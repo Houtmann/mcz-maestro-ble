@@ -491,6 +491,7 @@ static void setupChars() {
 static bool connectTarget() {
   // Remember oven BLE MAC as identity (without ':') -> unique MQTT/HA IDs.
   { String m = g_target->getAddress().toString().c_str(); m.replace(":",""); m.toLowerCase(); g_ovenMac = m; }
+  if(g_client){ NimBLEDevice::deleteClient(g_client); g_client=nullptr; }   // never leak a client
   g_client = NimBLEDevice::createClient();
   g_client->setClientCallbacks(&g_cliCb, false);   // false: don't delete callback object
   if(!g_client->connect(g_target)){ Serial.println(">> Connect error");
@@ -746,13 +747,30 @@ static void clockTick(){
   if(t.tm_year+1900 < 2024) return;
   if(ovenSetClock()){ lastSet=now; done=true; }
 }
+// Periodic diagnostic so instability (heap leak / WiFi drop / reboot) is visible in the log.
+static void heartbeat(){
+  static uint32_t last=0; uint32_t now=millis();
+  if(now-last < 60000) return; last=now;
+  Serial.printf("[hb] up=%lus heap=%u min=%u ble=%d wifi=%d mqtt=%d\n",
+    (unsigned long)(now/1000), (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+    g_connected?1:0, netWifiUp()?1:0, netMqttUp()?1:0);
+}
 void loop(){
   static String line;
   while(Serial.available()){ char c=(char)Serial.read();
     if(c=='\n'||c=='\r'){ if(line.length()){handleLine(line);line="";} } else line+=c; }
   if(g_doConnect){ g_doConnect=false;
     if(!connectTarget()){ delete g_target; g_target=nullptr; startScan(); } return; }
+  // BLE link dropped: free the stale client/target so a fresh scan+reconnect can start
+  // (otherwise g_target stays set and the rescan below never runs -> stuck offline).
+  if(!g_connected && g_client){
+    NimBLEDevice::deleteClient(g_client); g_client=nullptr;
+    if(g_target){ delete g_target; g_target=nullptr; }
+    g_abf1=g_abf2=nullptr;
+    Serial.println(">> BLE cleanup after disconnect -> rescanning");
+  }
   if(!g_connected && !g_target && !g_scanActive){ startScan(); }
+  heartbeat();
   alarmScan();      // read alarm-log history (pauses pollTick while reading)
   pollTick();
   netTick();

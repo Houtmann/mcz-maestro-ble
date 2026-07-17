@@ -5,3 +5,5 @@
 
 void netBegin();   // call in setup(): initialize WiFi + MQTT
 void netTick();    // call in loop(): keep connection alive, publish on-change/heartbeat
+bool netWifiUp();  // WiFi associated?
+bool netMqttUp();  // MQTT broker connected?

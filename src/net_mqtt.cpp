@@ -394,12 +394,19 @@ void netTick(){
   if (g_ovenSerial != g_discSerial || g_caps.detected != g_discCaps){
     publishDiscovery(); g_discSerial = g_ovenSerial; g_discCaps = g_caps.detected;
   }
-  if (g_oven.seq != g_lastPubSeq || now - g_lastPubMs > HEARTBEAT_MS){
+  // Publish on change, but throttled to >=1s apart (less heap churn / MQTT load over hours);
+  // plus a 30s heartbeat so HA stays fresh even without changes.
+  bool changed = (g_oven.seq != g_lastPubSeq) && (now - g_lastPubMs >= 1000);
+  if (changed || now - g_lastPubMs > HEARTBEAT_MS){
     publishState(); g_lastPubSeq = g_oven.seq; g_lastPubMs = now;
   }
 }
 
+bool netWifiUp(){ return WiFi.status()==WL_CONNECTED; }
+bool netMqttUp(){ return mqtt.connected(); }
 #else
 void netBegin(){}
 void netTick(){}
+bool netWifiUp(){ return false; }
+bool netMqttUp(){ return false; }
 #endif
