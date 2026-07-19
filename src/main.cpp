@@ -28,6 +28,7 @@
 #include "display.h"
 #include "appconfig.h"
 #include "ble_api.h"
+#include "chrono.h"
 #if defined(__has_include)
 #  if __has_include("config.h")
 #    include "config.h"
@@ -70,6 +71,11 @@ String    g_ovenMac;                    // oven BLE MAC without ':' (identity)
 String    g_ovenSerial;                 // serial number from 0x0ADC
 String    g_adcHex;                     // raw 0x0ADC (hex) for diagnostics
 static uint16_t g_lastReadBase = 0;     // base address of the last sent 0x03 read
+// Synchronous block-read capture (bleReadRegs, used by chrono.cpp etc.)
+static volatile bool g_rawCapture = false;
+static uint16_t      g_rawBase = 0;
+static uint16_t*     g_rawDst = nullptr;
+static volatile int  g_rawGot = -1;
 static bool     g_logRaw = true;        // verbose Modbus dumps (quieter via 'log off')
 static const uint32_t POLL_INTERVAL_MS = 2500;  // auto-poll rate per status block
 
@@ -137,6 +143,17 @@ static void sendWriteMulti(uint16_t reg, const uint16_t* vals, uint8_t n) {
   for(uint8_t i=0;i<n;i++){ pdu[7+2*i]=(uint8_t)(vals[i]>>8); pdu[7+2*i+1]=(uint8_t)(vals[i]&0xFF); }
   Serial.printf("Modbus WRITE-MULTI reg=0x%04X n=%u\n", reg, n);
   writeFrame(pdu, 7+n*2);
+}
+// Synchronous block read (ble_api.h): send fn03 read, wait for the notify response.
+// Call from loop context (e.g. a serial command), never from a BLE callback.
+bool bleReadRegs(uint16_t reg, uint16_t count, uint16_t* dst){
+  if(!g_connected || !g_abf1 || !dst || count==0 || count>125) return false;
+  g_rawDst=dst; g_rawBase=reg; g_rawGot=-1; g_rawCapture=true;
+  sendRead(reg, count);
+  uint32_t t0=millis();
+  while(g_rawGot<0 && millis()-t0<1500) delay(5);   // await response
+  g_rawCapture=false;
+  return g_rawGot>=(int)count;
 }
 
 // ---- Register -> OvenState (source irrelevant: poll read or ##-broadcast) ---
@@ -426,6 +443,10 @@ static void notifyCB(NimBLERemoteCharacteristic*, uint8_t *data, size_t len, boo
       ovenApplyReg(g_lastReadBase + (uint16_t)(i/2), r);       // read response -> OvenState
     }
     if (g_logRaw) Serial.println();
+    if (g_rawCapture && g_lastReadBase==g_rawBase && g_rawDst){  // synchronous block read (bleReadRegs)
+      int n=bc/2; for(int i=0;i<n;i++) g_rawDst[i]=(mb[3+2*i]<<8)|mb[3+2*i+1];
+      g_rawGot=n;
+    }
     if (g_lastReadBase==0x0ADC){                                // serial number (ASCII) + raw diagnostics
       String hexs, asc;
       for(uint8_t i=0;i<bc;i++){ uint8_t b=mb[3+i]; char h[3]; sprintf(h,"%02X",b); hexs+=h;
@@ -512,7 +533,7 @@ static void handleLine(String line){
   line.trim(); if(!line.length()) return; String low=line; low.toLowerCase();
   if(low=="help"){
     Serial.println("temp <c> | power <1-5> | mode <0-4> | fan <auto|1-5> | silent <on|off> | "
-                   "on | off | settime | alarms | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
+                   "on | off | settime | alarms | getchrono | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
   if(low=="poll"){ sendRead(0x02BC,0x33); return; }
   if(low=="status"){ printStatus(); return; }
   if(low=="on"){ ovenSetOnOff(true); return; }
@@ -520,6 +541,7 @@ static void handleLine(String line){
   if(low=="silent on"){ ovenSetSilent(true); return; }
   if(low=="silent off"){ ovenSetSilent(false); return; }
   if(low=="settime"){ ovenSetClock(); return; }
+  if(low=="getchrono"){ chronoPrint(); return; }
   if(low=="alarms"){ g_alarmDirty=true;               // force a fresh log read + print current
     Serial.print(">> Alarm history (newest first):");
     for(int k=0;k<10 && g_oven.alarmHist[k]>=0;k++) Serial.printf(" A%d", g_oven.alarmHist[k]);
