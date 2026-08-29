@@ -387,6 +387,7 @@ static bool mqttConnect(){
 void netBegin(){
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(true);                // BLE+WiFi coexistence: modem sleep MUST be on
+                                      // VERIFIE : setSleep(false) fait paniquer la puce (reboot en boucle)
 #if defined(USE_STATIC_IP) && (USE_STATIC_IP == 1)
   { IPAddress ip, gw, mask, dns;      // IP fixe -> pas de DHCP, association immediate
     if (ip.fromString(STATIC_IP) && gw.fromString(STATIC_GW) &&

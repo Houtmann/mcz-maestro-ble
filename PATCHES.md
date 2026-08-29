@@ -67,3 +67,23 @@ binaire compilé, dans lequel ces mêmes chaînes sont présentes en clair.
 
 `setup-secrets.sh` renseigne les quatre secrets de `src/config.h` par saisie masquée, sans
 les faire passer par l'historique du shell.
+
+## 5. Diagnostic réseau — commande série `wifi`
+
+Affiche `WiFi.status()`, l'adresse MAC, l'IP, le RSSI, puis scanne les réseaux visibles en
+marquant le SSID cible. Indispensable pour distinguer un problème de portée d'un problème
+d'association : ici le RSSI était de −52 dBm alors que le firmware restait en
+`WL_DISCONNECTED`, ce qui a écarté d'emblée l'hypothèse de la distance.
+
+## Piège vérifié : ne pas toucher au modem-sleep
+
+Le commentaire amont « BLE+WiFi coexistence: modem sleep MUST be on » n'est pas une
+précaution de principe. Remplacer `WiFi.setSleep(true)` par `false` fait **paniquer la puce
+et redémarrer en boucle** (`SW_CPU_RESET` avec backtrace). Testé, confirmé, annulé — le
+commentaire a été renforcé dans le code.
+
+## Nommage des entités Home Assistant
+
+L'`entity_id` est dérivé du **nom** de l'entité, pas de l'`object_id` de discovery : les
+entités « Fan 2 » et « Fan 3 » apparaissent en `select.<device>_fan_2` et `_fan_3`, avec un
+souligné.

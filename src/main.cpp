@@ -20,6 +20,7 @@
 // =============================================================================
 
 #include <Arduino.h>
+#include <WiFi.h>
 #include <NimBLEDevice.h>
 #include "mbedtls/aes.h"
 #include <time.h>          // NTP time for the oven clock (getLocalTime/configTzTime)
@@ -549,6 +550,20 @@ static void handleLine(String line){
                    "on | off | settime | alarms | getchrono | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
   if(low=="poll"){ sendRead(0x02BC,0x33); return; }
   if(low=="status"){ printStatus(); return; }
+  if(low=="wifi"){                    // diagnostic reseau : etat, MAC, portee
+    Serial.printf(">> WiFi status=%d (3=connected)  MAC=%s  IP=%s  RSSI=%d dBm\n",
+                  (int)WiFi.status(), WiFi.macAddress().c_str(),
+                  WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+    Serial.printf(">> SSID cible='%s' — scan en cours...\n", g_cfg.wifiSsid.c_str());
+    int n = WiFi.scanNetworks();
+    for(int i=0;i<n;i++){
+      bool mine = (WiFi.SSID(i) == g_cfg.wifiSsid);
+      Serial.printf("   %-28s rssi=%-5d ch=%-3d%s\n", WiFi.SSID(i).c_str(),
+                    WiFi.RSSI(i), WiFi.channel(i), mine ? "  <== CIBLE" : "");
+    }
+    if(n==0) Serial.println("   (aucun reseau visible)");
+    WiFi.scanDelete();
+    return; }
   if(low=="on"){ ovenSetOnOff(true); return; }
   if(low=="off"){ ovenSetOnOff(false); return; }
   if(low=="silent on"){ ovenSetSilent(true); return; }
