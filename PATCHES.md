@@ -87,3 +87,21 @@ commentaire a été renforcé dans le code.
 L'`entity_id` est dérivé du **nom** de l'entité, pas de l'`object_id` de discovery : les
 entités « Fan 2 » et « Fan 3 » apparaissent en `select.<device>_fan_2` et `_fan_3`, avec un
 souligné.
+
+## 6. Disponibilité MQTT — course avec le testament (LWT)
+
+`netTick()` ne publiait le topic de disponibilité que **sur changement** de l'état BLE.
+Quand la session MQTT tombe et se rétablit, le broker publie le testament `offline`
+(retenu) au moment où il détecte la session morte — ce qui peut arriver **après** que
+l'ESP se soit reconnecté et ait publié `online`. Home Assistant reste alors bloqué sur
+`offline` indéfiniment, alors même que les états continuent d'arriver et sont visibles
+dans le log du broker :
+
+```
+Received PUBLISH from mcz-xxxx (... 'mcz/xxxx/state' ...)   <- les donnees arrivent
+```
+tout en affichant l'entité `unavailable` dans HA.
+
+**Correctif** : republier la disponibilité à chaque battement (30 s), et plus seulement
+sur changement. Le message est retenu et idempotent, la republication est sans effet de
+bord.

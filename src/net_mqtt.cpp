@@ -420,7 +420,13 @@ void netTick(){
     return;
   }
   mqtt.loop();
-  if (g_oven.bleOnline != g_lastAvailBle){ publishAvail(g_oven.bleOnline); g_lastAvailBle = g_oven.bleOnline; }
+  // Disponibilite : republier periodiquement, pas seulement sur changement.
+  // Sinon course avec le testament (LWT) : si le broker publie "offline" APRES que
+  // l'ESP se soit reconnecte et ait publie "online", HA reste bloque sur offline
+  // alors que les etats continuent d'arriver.
+  { static uint32_t lastAvailMs = 0;
+    if (g_oven.bleOnline != g_lastAvailBle || now - lastAvailMs > HEARTBEAT_MS){
+      publishAvail(g_oven.bleOnline); g_lastAvailBle = g_oven.bleOnline; lastAvailMs = now; } }
   // Serial number AND the capability scan only complete after the connect -> re-publish
   // discovery once each becomes known (serial_number metadata; fan entity/level count
   // matched to the detected hardware).
