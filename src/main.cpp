@@ -159,6 +159,26 @@ bool bleReadRegs(uint16_t reg, uint16_t count, uint16_t* dst){
 
 // ---- Register -> OvenState (source irrelevant: poll read or ##-broadcast) ---
 static void bumpSeq(){ g_oven.seq++; g_oven.lastUpdateMs = millis(); }
+
+// Garde-fou sur les compteurs monotones (temps de fonctionnement, allumages, temps par
+// puissance). Une trame BLE tronquee ou corrompue produit des valeurs aberrantes qui, une
+// fois publiees sur des capteurs `total_increasing`, polluent DEFINITIVEMENT les
+// statistiques long terme de Home Assistant (un pic a 42 millions de minutes observe).
+// Regle : au-dessus d'un plafond absolu -> rejet ; bond superieur a maxJump depuis la
+// derniere valeur connue -> rejet ; une baisse n'est acceptee que si elle ramene pres de
+// zero (remise a zero legitime a l'entretien).
+static bool counterPlausible(const char* what, int32_t prev, int32_t next,
+                             int32_t maxJump, int32_t ceiling){
+  if (next < 0 || next > ceiling){
+    Serial.printf("!! %s: valeur aberrante %ld rejetee (plafond %ld)\n",
+                  what, (long)next, (long)ceiling); return false; }
+  if (prev < 0) return true;                       // premiere lecture
+  if (next < prev) return (next <= maxJump);       // remise a zero plausible seulement
+  if (next - prev > maxJump){
+    Serial.printf("!! %s: bond de %ld a %ld rejete (max %ld)\n",
+                  what, (long)prev, (long)next, (long)maxJump); return false; }
+  return true;
+}
 void ovenApplyReg(uint16_t reg, uint16_t val){
   static uint16_t workLo = 0;        // low word of the 32-bit work time (persists between calls)
   // Time in power level 1..5 (0x0336..0x033F): 5x 32-bit seconds, low word first -> minutes
@@ -168,6 +188,7 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     if ((reg & 1) == 0){ ptLo[idx] = val; }       // even address = low word
     else {                                        // odd = high word -> minutes
       int32_t m = (int32_t)((((uint32_t)val<<16) | ptLo[idx]) / 60);
+      if (!counterPlausible("time_power", g_oven.powerTimeMin[idx], m, 240, 5000000)) return;
       if (g_oven.powerTimeMin[idx] != m){ g_oven.powerTimeMin[idx] = m; bumpSeq(); }
     }
     return;
@@ -228,7 +249,8 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
         g_alarmLivePrev=code; } break;
     case REG_ALARM_IDX: g_alarmIndex=(val>>8); g_alarmNum=(val&0xFF); break;  // head / count
     case REG_FLAGS:    if(g_oven.flags !=(int16_t)val){g_oven.flags =(int16_t)val;bumpSeq(); } break;
-    case REG_IGNIT:    if(g_oven.ignitions!=(int32_t)val){g_oven.ignitions=(int32_t)val;bumpSeq();} break;
+    case REG_IGNIT:    if(counterPlausible("ignitions", g_oven.ignitions, (int32_t)val, 20, 200000)
+                          && g_oven.ignitions!=(int32_t)val){g_oven.ignitions=(int32_t)val;bumpSeq();} break;
     case REG_ACTIVE:   if(g_oven.active !=(int32_t)val){g_oven.active =(int32_t)val;bumpSeq();} break;
     case REG_FAN_COMB: if(g_oven.fanComb!=(int32_t)val){g_oven.fanComb=(int32_t)val;bumpSeq();} break;
     case REG_FAN_ROOM: if(g_oven.fanRoom!=(int32_t)val){g_oven.fanRoom=(int32_t)val;bumpSeq();} break;
@@ -237,7 +259,8 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_FAN3_SET: if(g_oven.fan3Set!=(int8_t)val){g_oven.fan3Set=(int8_t)val;bumpSeq();} break;
     case REG_WORK_LO:  workLo = val; break;                          // remember low; minutes at HI
     case REG_WORK_HI:  { int32_t m=(int32_t)((((uint32_t)val<<16)|workLo)/60);
-                         if(g_oven.worktimeMin!=m){g_oven.worktimeMin=m;bumpSeq();} } break;
+                         if(counterPlausible("worktime", g_oven.worktimeMin, m, 240, 5000000)
+                            && g_oven.worktimeMin!=m){g_oven.worktimeMin=m;bumpSeq();} } break;
     default: break;
   }
 }

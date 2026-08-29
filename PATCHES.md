@@ -137,3 +137,31 @@ risque ajouté en marche nominale. Vérifié en conditions réelles : `ble=1` ma
 **Piège d'inclusion** : `#include <WebServer.h>` doit être placé **après** `#include
 "config.h"` dans `net_mqtt.cpp`, sinon la macro `FALLBACK_AP` n'est pas encore définie et le
 type n'est pas déclaré.
+
+## 8. Garde-fou sur les compteurs — statistiques HA polluées définitivement
+
+Les compteurs (`worktime`, `ignitions`, `time_power_1..5`) sont publiés en
+`state_class: total_increasing`. Une **trame BLE corrompue** suffit à y injecter une valeur
+aberrante, et Home Assistant enregistre le bond dans ses statistiques long terme — de façon
+**irréversible** sans intervention manuelle.
+
+Observé en production : temps de fonctionnement du jour à **42 348 xxx minutes** et
+**13 103 allumages**, alors que les capteurs affichaient 2 225 min et 495 allumages. Un mot
+haut parasite sur un compteur 32 bits suffit : `(0xFFFF<<16)/60` dépasse déjà 71 millions.
+
+Origine probable : la troncature signalée par NimBLE dans les logs,
+`NimBLEAttValue: value exceeds max, len=514, max=512`.
+
+**Correctif** : `counterPlausible()` valide chaque mise à jour de compteur monotone —
+plafond absolu, bond maximal depuis la dernière valeur, et baisse acceptée uniquement si
+elle ramène près de zéro (remise à zéro légitime à l'entretien). Les valeurs rejetées sont
+journalisées sur la console série.
+
+| Compteur | Bond max | Plafond |
+|---|---|---|
+| `worktime` | 240 min | 5 000 000 min |
+| `time_power_N` | 240 min | 5 000 000 min |
+| `ignitions` | 20 | 200 000 |
+
+Le garde-fou empêche la pollution future ; les statistiques déjà corrompues doivent être
+supprimées côté Home Assistant (Outils de développement → Statistiques).
