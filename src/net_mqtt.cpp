@@ -12,7 +12,15 @@
 #include "config.h"
 #include "appconfig.h"
 #include "oven.h"
+#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+#include <WebServer.h>   // apres config.h : la macro doit etre connue
+#endif
 
+#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+static WebServer  g_diagSrv(80);
+static bool       g_apUp = false;
+static String     g_scanCache;
+#endif
 static WiFiClient   wifiClient;
 static PubSubClient mqtt(wifiClient);
 
@@ -409,8 +417,49 @@ void netTick(){
   uint32_t now = millis();
   if (WiFi.status() != WL_CONNECTED){
     if (now - lastWifi > 20000){ lastWifi = now; WiFi.reconnect(); }  // 5s -> 20s : laisser le temps a l'association
+#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+    if (!g_apUp && now > (uint32_t)FALLBACK_AP_DELAY_S * 1000UL){
+      g_scanCache = "";
+      int n = WiFi.scanNetworks();
+      for (int i=0;i<n;i++){
+        g_scanCache += WiFi.SSID(i) + "  " + String(WiFi.RSSI(i)) + " dBm  ch" + String(WiFi.channel(i));
+        if (WiFi.SSID(i) == g_cfg.wifiSsid) g_scanCache += "   <== CIBLE";
+        g_scanCache += "\n";
+      }
+      if (n == 0) g_scanCache = "(aucun reseau visible)\n";
+      WiFi.scanDelete();
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.softAP(FALLBACK_AP_SSID, FALLBACK_AP_PASS);
+      g_diagSrv.onNotFound([](){
+        String p = "MCZ BLE bridge - diagnostic\n\n";
+        p += "uptime      : " + String(millis()/1000) + " s\n";
+        p += "WiFi status : " + String((int)WiFi.status()) + "  (3 = connecte)\n";
+        p += "SSID cible  : " + g_cfg.wifiSsid + "\n";
+        p += "MAC         : " + WiFi.macAddress() + "\n";
+        p += "IP STA      : " + WiFi.localIP().toString() + "\n";
+        p += "RSSI        : " + String((int)WiFi.RSSI()) + " dBm\n";
+        p += "MQTT        : " + g_cfg.mqttHost + ":" + String(g_cfg.mqttPort)
+           + "  " + (mqtt.connected() ? "connecte" : "NON connecte") + "\n";
+        p += "BLE poele   : " + String(g_oven.bleOnline ? "en ligne" : "hors ligne") + "\n";
+        p += "Ambiante    : " + String(g_oven.roomC, 1) + " C\n\n";
+        p += "Reseaux vus au demarrage de ce point d'acces :\n" + g_scanCache;
+        g_diagSrv.send(200, "text/plain; charset=utf-8", p);
+      });
+      g_diagSrv.begin();
+      g_apUp = true;
+      Serial.printf(">> WiFi indisponible : point d'acces de secours '%s' ouvert, http://192.168.4.1/\n",
+                    FALLBACK_AP_SSID);
+    }
+    if (g_apUp) g_diagSrv.handleClient();
+#endif
     return;
   }
+#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+  if (g_apUp){                       // WiFi revenu : refermer l'AP de secours
+    g_diagSrv.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA);
+    g_apUp = false; Serial.println(">> WiFi retabli : point d'acces de secours ferme");
+  }
+#endif
   if (!g_idReady){                    // wait for identity (oven MAC)
     if (buildIdentity()){ g_idReady = true; Serial.printf(">> MQTT ID: %s\n", g_id.c_str()); }
     else return;

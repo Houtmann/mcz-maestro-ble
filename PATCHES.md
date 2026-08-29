@@ -105,3 +105,35 @@ tout en affichant l'entité `unavailable` dans HA.
 **Correctif** : republier la disponibilité à chaque battement (30 s), et plus seulement
 sur changement. Le message est retenu et idempotent, la republication est sans effet de
 bord.
+
+## 7. Point d'accès de secours pour le diagnostic
+
+Une fois posé loin de tout ordinateur, ce montage n'avait **aucun moyen de dire pourquoi il
+ne se connectait pas** : ni console série, ni MQTT, ni la moindre trace côté hostapd quand
+l'association échoue avant même la première tentative.
+
+Si le WiFi n'est pas connecté `FALLBACK_AP_DELAY_S` secondes après le démarrage, l'ESP passe
+en `WIFI_AP_STA`, ouvre son propre SSID et sert une page de texte brut sur
+`http://192.168.4.1/` : uptime, `WiFi.status()`, SSID cible, MAC, IP, RSSI, état MQTT, état
+BLE, température ambiante, et le **scan des réseaux visibles** capturé au moment de
+l'ouverture, SSID cible marqué. Il continue d'essayer le WiFi normal en parallèle et referme
+l'AP dès qu'il y parvient.
+
+Réglages dans `config.h` (`FALLBACK_AP` à `0` pour désactiver) :
+
+```c
+#define FALLBACK_AP           1
+#define FALLBACK_AP_SSID      "MCZ-Bridge"
+#define FALLBACK_AP_PASS      "mczbridge"
+#define FALLBACK_AP_DELAY_S   60
+```
+
+**Coexistence radio.** Faire tourner AP + STA + BLE simultanément est précisément le type de
+sollicitation qui fait planter la puce (cf. le piège du modem-sleep plus haut). Le délai de
+60 s garantit que l'AP ne s'ouvre que dans un état où le WiFi est déjà perdu — donc aucun
+risque ajouté en marche nominale. Vérifié en conditions réelles : `ble=1` maintenu, pas de
+`SW_CPU_RESET`, heap libre 136 ko (minimum 115 ko) contre 144 ko sans l'AP.
+
+**Piège d'inclusion** : `#include <WebServer.h>` doit être placé **après** `#include
+"config.h"` dans `net_mqtt.cpp`, sinon la macro `FALLBACK_AP` n'est pas encore définie et le
+type n'est pas déclaré.

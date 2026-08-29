@@ -40,3 +40,23 @@
 // ---- Home Assistant MQTT discovery ----
 // Discovery prefix of Home Assistant (default: "homeassistant").
 #define HA_DISCOVERY_PREFIX "homeassistant"
+
+// ---- IP statique (optionnel) -----------------------------------------------
+// Supprime l'etape DHCP. Utile quand le point d'acces sert le bail lentement :
+// le firmware attend WL_CONNECTED, qui exige une IP.
+// Choisir une adresse HORS du pool DHCP du point d'acces.
+#define USE_STATIC_IP  0
+#define STATIC_IP      "192.168.0.20"
+#define STATIC_GW      "192.168.0.1"
+#define STATIC_MASK    "255.255.255.0"
+#define STATIC_DNS     "192.168.0.1"
+
+// ---- Point d'acces de secours (diagnostic) ---------------------------------
+// Si le WiFi n'est pas connecte apres FALLBACK_AP_DELAY_S secondes, l'ESP ouvre
+// son propre SSID et sert une page d'etat en texte brut sur http://192.168.4.1/
+// (status WiFi, MAC, RSSI, etat MQTT et BLE, scan des reseaux visibles).
+// Il continue d'essayer le WiFi normal et referme l'AP des qu'il y arrive.
+#define FALLBACK_AP           1
+#define FALLBACK_AP_SSID      "MCZ-Bridge"
+#define FALLBACK_AP_PASS      "mczbridge"      // 8 caracteres minimum (WPA2)
+#define FALLBACK_AP_DELAY_S   60
