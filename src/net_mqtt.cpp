@@ -172,6 +172,24 @@ static void publishDiscovery(){
     addDevice(d.as<JsonObject>());
     publishJson(discoTopic("select", "fan"), d, true);
   }
+  for (int fi = 2; fi <= 3; fi++){          // ducted fans: set_vent_v2 / set_vent_v3
+    if (g_caps.detected && g_caps.fanCount < fi) continue;
+    JsonDocument d;
+    char nm[8], oid[8];
+    snprintf(nm,  sizeof(nm),  "Fan %d", fi);
+    snprintf(oid, sizeof(oid), "fan%d",  fi);
+    d["name"]      = nm;
+    d["unique_id"] = g_id + "_" + oid;
+    d["availability_topic"] = T_AVAIL;
+    d["command_topic"] = T_BASE + "/set/" + oid;
+    d["state_topic"]   = T_STATE;
+    d["value_template"]= String("{{ value_json.") + oid + " | default('') }}";
+    JsonArray op = d["options"].to<JsonArray>();
+    op.add("Auto");
+    for (int i=1;i<=fanLevels;i++){ char b[4]; snprintf(b,sizeof(b),"%d",i); op.add(b); }
+    addDevice(d.as<JsonObject>());
+    publishJson(discoTopic("select", oid), d, true);
+  }
   if (hasFan){ // switch: silent mode
     JsonDocument d;
     d["name"]      = "Silent";
@@ -254,6 +272,8 @@ static void publishState(){
     else { char b[12]; snprintf(b,sizeof(b),"0x%04X",(unsigned)g_oven.state); d["phase_name"] = b; }
   }
   if (g_oven.fanLevel>=0)      d["fan_level"] = g_oven.fanLevel;
+  if (g_oven.fan2Set>=0)       d["fan2"] = (g_oven.fan2Set==6) ? String("Auto") : String((int)g_oven.fan2Set);
+  if (g_oven.fan3Set>=0)       d["fan3"] = (g_oven.fan3Set==6) ? String("Auto") : String((int)g_oven.fan3Set);
   if (g_oven.fanRoom>=0)       d["fan_room"]  = g_oven.fanRoom;   // flue gas fan RPM
   if (g_oven.fanComb>=0)       d["fan_comb"]  = g_oven.fanComb;   // combustion fan RPM
   if (g_oven.active>=0)        d["active"]    = g_oven.active;    // app value "active"
@@ -329,6 +349,8 @@ static void onMqtt(char* topic, byte* payload, unsigned int len){
     if (m=="on"||m=="1"||m=="true")   ovenSetSilent(true);
     else if (m=="off"||m=="0"||m=="false") ovenSetSilent(false);
   }
+  else if (t == T_BASE + "/set/fan2"){ String m=msg; m.toLowerCase(); ovenSetFanN(2, m=="auto"?0:msg.toInt()); }
+  else if (t == T_BASE + "/set/fan3"){ String m=msg; m.toLowerCase(); ovenSetFanN(3, m=="auto"?0:msg.toInt()); }
   else for (int i=0;i<HYDRO_NUM_CNT;i++){                  // hydro settings (set/<oid>)
     if (t == T_BASE + "/set/" + HYDRO_NUMS[i].oid){ ovenSetTempParam(HYDRO_NUMS[i].reg, msg.toFloat()); break; }
   }
@@ -350,6 +372,8 @@ static bool mqttConnect(){
   mqtt.subscribe(T_SET_ONOFF.c_str());
   mqtt.subscribe(T_SET_FAN.c_str());
   mqtt.subscribe(T_SET_SILENT.c_str());
+  mqtt.subscribe((T_BASE + "/set/fan2").c_str());
+  mqtt.subscribe((T_BASE + "/set/fan3").c_str());
   for (int i=0;i<HYDRO_NUM_CNT;i++)                 // hydro settings (harmless if not a hydro oven)
     mqtt.subscribe((T_BASE + "/set/" + HYDRO_NUMS[i].oid).c_str());
   publishDiscovery(); g_discSerial = g_ovenSerial;  // name = MAC -> immediately correct
@@ -363,6 +387,15 @@ static bool mqttConnect(){
 void netBegin(){
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(true);                // BLE+WiFi coexistence: modem sleep MUST be on
+#if defined(USE_STATIC_IP) && (USE_STATIC_IP == 1)
+  { IPAddress ip, gw, mask, dns;      // IP fixe -> pas de DHCP, association immediate
+    if (ip.fromString(STATIC_IP) && gw.fromString(STATIC_GW) &&
+        mask.fromString(STATIC_MASK) && dns.fromString(STATIC_DNS)) {
+      if (!WiFi.config(ip, gw, mask, dns)) Serial.println("!! WiFi.config (IP statique) a echoue");
+      else Serial.printf(">> IP statique %s (gw %s)\n", STATIC_IP, STATIC_GW);
+    } else Serial.println("!! IP statique: adresse invalide dans config.h");
+  }
+#endif
   WiFi.begin(g_cfg.wifiSsid.c_str(), g_cfg.wifiPass.c_str());
   Serial.printf(">> WiFi: connecting to '%s' ...\n", g_cfg.wifiSsid.c_str());
   mqtt.setServer(g_cfg.mqttHost.c_str(), g_cfg.mqttPort);
@@ -374,7 +407,7 @@ void netTick(){
   static uint32_t lastWifi=0, lastMqtt=0;
   uint32_t now = millis();
   if (WiFi.status() != WL_CONNECTED){
-    if (now - lastWifi > 5000){ lastWifi = now; WiFi.reconnect(); }
+    if (now - lastWifi > 20000){ lastWifi = now; WiFi.reconnect(); }  // 5s -> 20s : laisser le temps a l'association
     return;
   }
   if (!g_idReady){                    // wait for identity (oven MAC)

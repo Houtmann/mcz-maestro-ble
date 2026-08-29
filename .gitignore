@@ -1,0 +1,8 @@
+# Secrets — NE JAMAIS COMMITER : contient SSID, mots de passe WiFi et MQTT
+src/config.h
+
+# Artefacts de build — le binaire compile embarque les secrets de config.h
+.pio/
+
+.vscode/
+.DS_Store

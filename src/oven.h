@@ -39,6 +39,8 @@ static const uint16_t REG_ACTIVE   = 0x02C9;  // App value "active"
 static const uint16_t REG_FAN_COMB = 0x02CE;  // Combustion fan RPM
 static const uint16_t REG_FAN_ROOM = 0x02D1;  // Flue gas/exhaust fan RPM
 static const uint16_t REG_FAN_SET  = 0x03FA;  // Write: 1..5 = fixed level, 6 = auto ventilation
+static const uint16_t REG_FAN2_SET = 0x03FB;  // set_vent_v2 : 2nd (ducted) fan, same encoding
+static const uint16_t REG_FAN3_SET = 0x03FC;  // set_vent_v3 : 3rd (ducted) fan, same encoding
 static const uint16_t REG_FAN_LIVE = 0x0324;  // Live fan level (follows REG_FAN_SET; automatic under Auto)
 static const uint16_t REG_SILENT   = 0x03EC;  // Write: 1 = Silent on, 0 = off (mirrors Flags Bit5)
 // Hydro settings (read/write, °C ÷10) — verified against the app on the Hydro oven:
@@ -107,6 +109,8 @@ struct OvenState {
   int32_t  fanRoom    = -1;    // Flue gas fan RPM
   int32_t  active     = -1;    // App value "active" (0x02C9)
   int8_t   fanLevel   = -1;    // Live control fan level (0x0324), 1..5
+  int8_t   fan2Set    = -1;    // set_vent_v2 (0x03FB): 1..5, 6 = Auto
+  int8_t   fan3Set    = -1;    // set_vent_v3 (0x03FC): 1..5, 6 = Auto
   int16_t  alarmHist[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};  // last 10 alarm codes, newest first (-1=empty, 0=none)
   bool     bleOnline  = false; // BLE link to oven active
   uint32_t lastUpdateMs = 0;   // millis() of the last value update
@@ -155,6 +159,7 @@ bool ovenSetPower(int level);    // 1..5
 bool ovenSetMode(int mode);      // 0..4 (see REG_MODE enum)
 bool ovenSetOnOff(bool on);      // TODO: write register still unknown 
 bool ovenSetFan(int level);      // 0 = Auto (writes 6), 1..5 = fixed level -> REG_FAN_SET
+bool ovenSetFanN(int idx, int level);  // idx 2|3 -> REG_FAN2_SET / REG_FAN3_SET, same encoding
 bool ovenSetSilent(bool on);     // Silent mode on/off -> REG_SILENT
 bool ovenSetTempParam(uint16_t reg, float celsius);  // write a °C-scaled setting (value = C*10)
 bool ovenSetClock();             // set the oven RTC from NTP (writes 900-903 + trigger 904)

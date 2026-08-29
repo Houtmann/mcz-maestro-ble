@@ -232,6 +232,8 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_FAN_COMB: if(g_oven.fanComb!=(int32_t)val){g_oven.fanComb=(int32_t)val;bumpSeq();} break;
     case REG_FAN_ROOM: if(g_oven.fanRoom!=(int32_t)val){g_oven.fanRoom=(int32_t)val;bumpSeq();} break;
     case REG_FAN_LIVE: if(g_oven.fanLevel!=(int8_t)val){g_oven.fanLevel=(int8_t)val;bumpSeq();} break;
+    case REG_FAN2_SET: if(g_oven.fan2Set!=(int8_t)val){g_oven.fan2Set=(int8_t)val;bumpSeq();} break;
+    case REG_FAN3_SET: if(g_oven.fan3Set!=(int8_t)val){g_oven.fan3Set=(int8_t)val;bumpSeq();} break;
     case REG_WORK_LO:  workLo = val; break;                          // remember low; minutes at HI
     case REG_WORK_HI:  { int32_t m=(int32_t)((((uint32_t)val<<16)|workLo)/60);
                          if(g_oven.worktimeMin!=m){g_oven.worktimeMin=m;bumpSeq();} } break;
@@ -278,6 +280,15 @@ bool ovenSetFan(int level){
   uint16_t v = level==0 ? 6 : (uint16_t)level;
   Serial.printf(">> Fan %s -> reg 0x%04X = %u\n", level==0?"Auto":String(level).c_str(), REG_FAN_SET, v);
   sendWrite(REG_FAN_SET, v); return true;
+}
+bool ovenSetFanN(int idx, int level){
+  // 2e/3e ventilateur (gaines). 0 = Auto (ecrit 6), 1..5 = niveau fixe.
+  if(idx<2||idx>3){ Serial.println("!! fan index 2 or 3"); return false; }
+  if(level<0||level>5){ Serial.println("!! Fan 0=Auto, 1..5=level"); return false; }
+  uint16_t reg = (idx==2) ? REG_FAN2_SET : REG_FAN3_SET;
+  uint16_t v = level==0 ? 6 : (uint16_t)level;
+  Serial.printf(">> Fan%d %s -> reg 0x%04X = %u\n", idx, level==0?"Auto":String(level).c_str(), reg, v);
+  sendWrite(reg, v); return true;
 }
 bool ovenSetSilent(bool on){
   Serial.printf(">> Silent %s -> reg 0x%04X = %u\n", on?"ON":"OFF", REG_SILENT, on?1:0);
@@ -358,6 +369,8 @@ static void printStatus(){
                                 Serial.printf("  Phase 0x0320     = 0x%04X (%s)\n", (unsigned)g_oven.state, sn[0]?sn:"unknown"); }
   else if (g_oven.phase>=0)     Serial.printf("  Phase            = %d (%s)\n", g_oven.phase, g_oven.phase==3?"On":g_oven.phase==1?"Off":"?");
   if (g_oven.fanLevel>=0)       Serial.printf("  Fan level        = %d\n", g_oven.fanLevel);
+  if (g_oven.fan2Set>=0)        Serial.printf("  Fan 2 (ducted)   = %s\n", g_oven.fan2Set==6?"Auto":String((int)g_oven.fan2Set).c_str());
+  if (g_oven.fan3Set>=0)        Serial.printf("  Fan 3 (ducted)   = %s\n", g_oven.fan3Set==6?"Auto":String((int)g_oven.fan3Set).c_str());
   if (g_oven.fanRoom>=0)        Serial.printf("  Fumes fan        = %ld rpm\n", (long)g_oven.fanRoom);
   if (g_oven.fanComb>=0)        Serial.printf("  Combustion fan   = %ld rpm\n", (long)g_oven.fanComb);
   if (g_oven.active>=0)         Serial.printf("  Active           = %ld\n", (long)g_oven.active);
@@ -532,7 +545,7 @@ static long hx(const String&s){ return strtol(s.c_str(),nullptr,16); }
 static void handleLine(String line){
   line.trim(); if(!line.length()) return; String low=line; low.toLowerCase();
   if(low=="help"){
-    Serial.println("temp <c> | power <1-5> | mode <0-4> | fan <auto|1-5> | silent <on|off> | "
+    Serial.println("temp <c> | power <1-5> | mode <0-4> | fan|fan2|fan3 <auto|1-5> | silent <on|off> | "
                    "on | off | settime | alarms | getchrono | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
   if(low=="poll"){ sendRead(0x02BC,0x33); return; }
   if(low=="status"){ printStatus(); return; }
@@ -583,6 +596,9 @@ static void handleLine(String line){
   if(low.startsWith("mode ")  && s1>=0){ ovenSetMode(line.substring(s1+1).toInt());   return; }
   if(low.startsWith("fan ")   && s1>=0){ String a=line.substring(s1+1); a.trim(); a.toLowerCase();
     ovenSetFan(a=="auto"?0:a.toInt()); return; }
+  if((low.startsWith("fan2 ")||low.startsWith("fan3 ")) && s1>=0){
+    String a=line.substring(s1+1); a.trim(); a.toLowerCase();
+    ovenSetFanN(low[3]-'0', a=="auto"?0:a.toInt()); return; }
   Serial.println("Unknown. 'help'.");
 }
 
@@ -738,7 +754,7 @@ static void pollTick(){
   switch(idx % steps){
     case 0: sendRead(0x02BC, 51); break;   // room/control board/fumes temp
     case 1: sendRead(0x0320, 77); break;   // phase, flags, counter, fans
-    case 2: sendRead(0x03E9, 15); break;   // mode, power, setpoint
+    case 2: sendRead(0x03E9, 20); break;   // mode, power, setpoint, set_vent_v1..v3
     case 3: sendRead(0x0ADC,  8); break;   // serial number (only while unknown)
   }
   idx = (idx+1) % steps;
