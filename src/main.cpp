@@ -72,6 +72,7 @@ String    g_ovenMac;                    // oven BLE MAC without ':' (identity)
 String    g_ovenSerial;                 // serial number from 0x0ADC
 String    g_adcHex;                     // raw 0x0ADC (hex) for diagnostics
 static uint16_t g_lastReadBase = 0;     // base address of the last sent 0x03 read
+static uint16_t g_lastReadCount = 0;    // register count of the last sent 0x03 read
 // Synchronous block-read capture (bleReadRegs, used by chrono.cpp etc.)
 static volatile bool g_rawCapture = false;
 static uint16_t      g_rawBase = 0;
@@ -127,6 +128,7 @@ static void writeFrame(const uint8_t *pdu, size_t pduLen) {
 
 static void sendRead(uint16_t reg, uint16_t count) {
   g_lastReadBase = reg;   // response (function 03) carries no address -> remember base here
+  g_lastReadCount = count;
   uint8_t pdu[6]={0x01,0x03,(uint8_t)(reg>>8),(uint8_t)reg,(uint8_t)(count>>8),(uint8_t)count};
   Serial.printf("Modbus READ  reg=0x%04X count=%u\n", reg, count); writeFrame(pdu,6);
 }
@@ -167,28 +169,49 @@ static void bumpSeq(){ g_oven.seq++; g_oven.lastUpdateMs = millis(); }
 // Regle : au-dessus d'un plafond absolu -> rejet ; bond superieur a maxJump depuis la
 // derniere valeur connue -> rejet ; une baisse n'est acceptee que si elle ramene pres de
 // zero (remise a zero legitime a l'entretien).
-static bool counterPlausible(const char* what, int32_t prev, int32_t next,
+// Premiere lecture : acceptee seulement si la meme valeur est relue CONFIRM_HITS fois de
+// suite (sinon une valeur aberrante a l'amorcage passe sans controle, puis fait rejeter
+// toutes les valeurs justes qui suivent). Pour la meme raison, une valeur rejetee mais
+// relue a l'identique CONFIRM_HITS fois de suite finit par etre acceptee (auto-reparation).
+struct CounterGuard { int32_t pending = -1; uint8_t hits = 0; };
+static const uint8_t CONFIRM_HITS = 3;
+static bool counterConfirmed(CounterGuard& g, int32_t next){
+  if (g.pending == next){ if (g.hits < 255) g.hits++; }
+  else { g.pending = next; g.hits = 1; }
+  return g.hits >= CONFIRM_HITS;
+}
+static bool counterPlausible(CounterGuard& g, const char* what, int32_t prev, int32_t next,
                              int32_t maxJump, int32_t ceiling){
   if (next < 0 || next > ceiling){
     Serial.printf("!! %s: valeur aberrante %ld rejetee (plafond %ld)\n",
-                  what, (long)next, (long)ceiling); return false; }
-  if (prev < 0) return true;                       // premiere lecture
-  if (next < prev) return (next <= maxJump);       // remise a zero plausible seulement
-  if (next - prev > maxJump){
+                  what, (long)next, (long)ceiling); g.hits = 0; return false; }
+  bool ok;
+  if (prev < 0)          ok = false;                     // premiere lecture : a confirmer
+  else if (next < prev)  ok = (next <= maxJump);         // remise a zero plausible seulement
+  else                   ok = (next - prev <= maxJump);
+  bool confirmed = counterConfirmed(g, next);
+  if (ok) return true;
+  if (confirmed){
+    Serial.printf("!! %s: %ld -> %ld accepte apres %u lectures identiques\n",
+                  what, (long)prev, (long)next, (unsigned)CONFIRM_HITS); return true; }
+  if (prev >= 0)
     Serial.printf("!! %s: bond de %ld a %ld rejete (max %ld)\n",
-                  what, (long)prev, (long)next, (long)maxJump); return false; }
-  return true;
+                  what, (long)prev, (long)next, (long)maxJump);
+  return false;
 }
 void ovenApplyReg(uint16_t reg, uint16_t val){
   static uint16_t workLo = 0;        // low word of the 32-bit work time (persists between calls)
-  // Time in power level 1..5 (0x0336..0x033F): 5x 32-bit seconds, low word first -> minutes
+  // Time in power level 1..5 (0x0336..0x033F): 5x 32-bit MINUTES, low word first.
+  // (Pas des secondes : divise par 60, le compteur total donnait 37 h pour 496 allumages,
+  // alors qu'une seule sequence d'allumage dure ~8 min. Les valeurs etaient donc des heures.)
   if (reg >= REG_PTIME_LO && reg <= REG_PTIME_HI){
     static uint16_t ptLo[5] = {0};
     int idx = (reg - REG_PTIME_LO) / 2;          // 0..4
     if ((reg & 1) == 0){ ptLo[idx] = val; }       // even address = low word
     else {                                        // odd = high word -> minutes
-      int32_t m = (int32_t)((((uint32_t)val<<16) | ptLo[idx]) / 60);
-      if (!counterPlausible("time_power", g_oven.powerTimeMin[idx], m, 240, 5000000)) return;
+      int32_t m = (int32_t)(((uint32_t)val<<16) | ptLo[idx]);
+      static CounterGuard ptGuard[5];
+      if (!counterPlausible(ptGuard[idx], "time_power", g_oven.powerTimeMin[idx], m, 240, 5000000)) return;
       if (g_oven.powerTimeMin[idx] != m){ g_oven.powerTimeMin[idx] = m; bumpSeq(); }
     }
     return;
@@ -249,8 +272,9 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
         g_alarmLivePrev=code; } break;
     case REG_ALARM_IDX: g_alarmIndex=(val>>8); g_alarmNum=(val&0xFF); break;  // head / count
     case REG_FLAGS:    if(g_oven.flags !=(int16_t)val){g_oven.flags =(int16_t)val;bumpSeq(); } break;
-    case REG_IGNIT:    if(counterPlausible("ignitions", g_oven.ignitions, (int32_t)val, 20, 200000)
-                          && g_oven.ignitions!=(int32_t)val){g_oven.ignitions=(int32_t)val;bumpSeq();} break;
+    case REG_IGNIT:  { static CounterGuard ig;
+                       if(counterPlausible(ig, "ignitions", g_oven.ignitions, (int32_t)val, 20, 200000)
+                          && g_oven.ignitions!=(int32_t)val){g_oven.ignitions=(int32_t)val;bumpSeq();} } break;
     case REG_ACTIVE:   if(g_oven.active !=(int32_t)val){g_oven.active =(int32_t)val;bumpSeq();} break;
     case REG_FAN_COMB: if(g_oven.fanComb!=(int32_t)val){g_oven.fanComb=(int32_t)val;bumpSeq();} break;
     case REG_FAN_ROOM: if(g_oven.fanRoom!=(int32_t)val){g_oven.fanRoom=(int32_t)val;bumpSeq();} break;
@@ -258,8 +282,8 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_FAN2_SET: if(g_oven.fan2Set!=(int8_t)val){g_oven.fan2Set=(int8_t)val;bumpSeq();} break;
     case REG_FAN3_SET: if(g_oven.fan3Set!=(int8_t)val){g_oven.fan3Set=(int8_t)val;bumpSeq();} break;
     case REG_WORK_LO:  workLo = val; break;                          // remember low; minutes at HI
-    case REG_WORK_HI:  { int32_t m=(int32_t)((((uint32_t)val<<16)|workLo)/60);
-                         if(counterPlausible("worktime", g_oven.worktimeMin, m, 240, 5000000)
+    case REG_WORK_HI:  { static CounterGuard wg; int32_t m=(int32_t)(((uint32_t)val<<16)|workLo);  // minutes
+                         if(counterPlausible(wg, "worktime", g_oven.worktimeMin, m, 240, 5000000)
                             && g_oven.worktimeMin!=m){g_oven.worktimeMin=m;bumpSeq();} } break;
     default: break;
   }
@@ -473,6 +497,14 @@ static void notifyCB(NimBLERemoteCharacteristic*, uint8_t *data, size_t len, boo
   // Function 03 response: [01][03][bytecount][data...][crc]
   if (mbLen>=5 && mb[1]==0x03) {
     uint8_t bc = mb[2];
+    // La reponse 03 ne porte pas d'adresse : elle est rattachee a la derniere lecture
+    // envoyee. Si sa taille ne correspond pas, c'est la reponse tardive d'une AUTRE lecture
+    // (ex. bloc 0x02BC de 51 registres pris pour 0x0320) -> registres decales, on jette.
+    if (bc != 2*g_lastReadCount){
+      Serial.printf("[abf2] reponse de %u registres pour une lecture de %u @0x%04X -> ignoree\n",
+                    (unsigned)(bc/2), (unsigned)g_lastReadCount, (unsigned)g_lastReadBase);
+      return;
+    }
     if (g_logRaw) Serial.printf("       %u data bytes (%u registers 16bit): ", bc, bc/2);
     for (uint8_t i=0;i+1<bc;i+=2) {
       uint16_t r = (mb[3+i]<<8)|mb[3+i+1];

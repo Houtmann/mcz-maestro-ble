@@ -165,3 +165,48 @@ journalisées sur la console série.
 
 Le garde-fou empêche la pollution future ; les statistiques déjà corrompues doivent être
 supprimées côté Home Assistant (Outils de développement → Statistiques).
+
+## 9. Garde-fou, suite — amorçage non contrôlé et réponses mal attribuées
+
+Le garde-fou du §8 avait deux trous, révélés au retour du pont après quelques jours
+d'absence : le compteur d'allumages est passé de 496 à **4 617** et y est resté.
+
+1. **La première valeur après un démarrage était acceptée sans contrôle** (`prev < 0`).
+2. **Ensuite, la vraie valeur était rejetée indéfiniment** : 496 < 4 617 passe pour une
+   baisse impossible. Le garde-fou verrouillait la valeur fausse jusqu'au redémarrage
+   suivant.
+
+Dans la même trame, `time_power_2` a reçu 1 749 999 min, corrigé par chance à la lecture
+suivante (148 ≤ bond max, donc pris pour une remise à zéro).
+
+**Correctifs** :
+
+- Chaque compteur a son `CounterGuard`. Une première valeur n'est acceptée qu'après
+  **3 lectures identiques consécutives**. Une valeur rejetée mais relue 3 fois à
+  l'identique finit par être acceptée : le compteur ne peut plus rester bloqué.
+- Une réponse Modbus 03 ne porte pas d'adresse ; elle est rattachée à la dernière lecture
+  envoyée (`g_lastReadBase`). Or le poll envoie une lecture toutes les 2,5 s sans attendre
+  la réponse précédente : une réponse tardive est décalée sur le mauvais bloc. La taille
+  de la réponse est désormais comparée au nombre de registres demandés
+  (`g_lastReadCount`) ; les blocs lus font 51, 77, 20 et 8 registres, donc une réponse
+  décalée est toujours détectée et ignorée.
+
+Vérifié au reflash : `ignitions: -1 -> 497 accepte apres 3 lectures identiques`.
+
+## 10. Temps de fonctionnement : les registres sont en minutes, pas en secondes
+
+Le code d'origine lisait `0x0340/41` (temps total) et `0x0336..0x033F` (temps par
+puissance) comme des secondes 32 bits et divisait par 60. Ce sont des **minutes**.
+
+Preuve : 2 225 « minutes » pour 496 allumages ferait 4,5 min par allumage, alors qu'une
+séquence d'allumage seule (nettoyage → chargement → Start 1 → Start 2 → stabilisation)
+dure environ 8 min. En minutes, on obtient 2 225 h, soit 4,5 h par allumage : cohérent.
+Les valeurs affichées étaient donc des heures tronquées, qui n'avançaient que d'une unité
+par heure de chauffe — d'où l'impression que le compteur ne montait pas.
+
+Lecture brute : temps total `2479, 2` → 133 551 min = 2 225,85 h.
+
+**Correctif** : plus de division ; les compteurs internes sont en minutes et publiés en
+heures à 2 décimales (`worktime_h`, `pt1_h`..`pt5_h`), unité `h`, `device_class:
+duration`. Les `entity_id` ne changent pas, mais l'unité passe de `min` à `h` : les
+statistiques long terme existantes sont à effacer côté Home Assistant.

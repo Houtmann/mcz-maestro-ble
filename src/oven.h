@@ -31,9 +31,9 @@ static const uint16_t REG_ALARM    = 0x0323;  // tipo_allarme = LOW byte (0 = no
 static const uint16_t REG_ALARM_IDX= 0x07EA;  // index_allarme (hi) / num_allarmi (lo) — alarm log head
 static const uint16_t REG_FLAGS    = 0x0332;  // Bit field: Bit6=Chrono, Bit5=Silent
 static const uint16_t REG_IGNIT    = 0x0334;  // Ignition counter
-static const uint16_t REG_WORK_LO  = 0x0340;  // Total working time (sec, 32-bit LE word)
+static const uint16_t REG_WORK_LO  = 0x0340;  // Total working time (minutes, 32-bit LE word)
 static const uint16_t REG_WORK_HI  = 0x0341;
-static const uint16_t REG_PTIME_LO = 0x0336;  // Time in power 1..5: 5x 32-bit (sec),
+static const uint16_t REG_PTIME_LO = 0x0336;  // Time in power 1..5: 5x 32-bit (minutes),
 static const uint16_t REG_PTIME_HI = 0x033F;  // low word first, 0x0336..0x033F
 static const uint16_t REG_ACTIVE   = 0x02C9;  // App value "active" 
 static const uint16_t REG_FAN_COMB = 0x02CE;  // Combustion fan RPM

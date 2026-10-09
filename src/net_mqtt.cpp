@@ -238,13 +238,13 @@ static void publishDiscovery(){
   addSensor("active", "Active",             "{{ value_json.active }}", "", "", "measurement");
   addSensor("phase", "Phase", "{{ value_json.phase_name }}", "", "", "");
   addSensor("ignitions", "Ignitions", "{{ value_json.ignitions }}", "", "", "total_increasing");
-  addSensor("worktime", "Total working time", "{{ value_json.worktime_min }}", "min", "duration", "total_increasing");
+  addSensor("worktime", "Total working time", "{{ value_json.worktime_h }}", "h", "duration", "total_increasing");
   for (int i=1;i<=5;i++){
     char oid[12], name[20], tpl[40];
     snprintf(oid,  sizeof(oid),  "ptime%d", i);
     snprintf(name, sizeof(name), "Time power %d", i);
-    snprintf(tpl,  sizeof(tpl),  "{{ value_json.pt%d }}", i);
-    addSensor(oid, name, tpl, "min", "duration", "total_increasing");
+    snprintf(tpl,  sizeof(tpl),  "{{ value_json.pt%d_h }}", i);
+    addSensor(oid, name, tpl, "h", "duration", "total_increasing");
   }
   // Alarm log (all ovens): last alarm + history (raw Axx codes; meanings are model-specific)
   { JsonDocument d;
@@ -287,9 +287,10 @@ static void publishState(){
   if (g_oven.active>=0)        d["active"]    = g_oven.active;    // app value "active"
   if (g_oven.flags>=0){ d["chrono"] = (g_oven.flags>>6)&1; d["silent"] = (g_oven.flags>>5)&1; }
   if (g_oven.ignitions>=0)   d["ignitions"]    = g_oven.ignitions;
-  if (g_oven.worktimeMin>=0) d["worktime_min"] = g_oven.worktimeMin;
+  // Compteurs internes en minutes, publies en heures a 2 decimales (resolution 1 min).
+  if (g_oven.worktimeMin>=0) d["worktime_h"] = serialized(String(g_oven.worktimeMin/60.0, 2));
   for (int i=0;i<5;i++) if (g_oven.powerTimeMin[i]>=0){
-    char k[8]; snprintf(k,sizeof(k),"pt%d",i+1); d[k] = g_oven.powerTimeMin[i];
+    char k[8]; snprintf(k,sizeof(k),"pt%d_h",i+1); d[k] = serialized(String(g_oven.powerTimeMin[i]/60.0, 2));
   }
   d["ble"] = g_oven.bleOnline;
   d["seq"] = g_oven.seq;
