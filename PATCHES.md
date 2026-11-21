@@ -210,3 +210,64 @@ Lecture brute : temps total `2479, 2` → 133 551 min = 2 225,85 h.
 heures à 2 décimales (`worktime_h`, `pt1_h`..`pt5_h`), unité `h`, `device_class:
 duration`. Les `entity_id` ne changent pas, mais l'unité passe de `min` à `h` : les
 statistiques long terme existantes sont à effacer côté Home Assistant.
+
+## 11. Gardes de plage sur `power`, ventilateurs et réglages hydro (erreurs MQTT répétées dans HA)
+
+HA logguait en boucle des valeurs hors plage : `power` = 14 (plage 1-5), `fan_level` = 0
+(options `Auto, 1..5`), `hyst` = 3193,4 (0-20), `pump_min_on` = 179,2 (20-90),
+`water_set` = 0 (30-85). Les compteurs d'heures et `ignitions` sont sains.
+
+**Correctif** (symptôme seulement) :
+- `main.cpp` : `REG_POWER` n'est mémorisé que si la valeur brute 16 bits est entre 1 et 5,
+  testée avant le cast `int8_t` ; sinon `power` reste inchangé.
+- `net_mqtt.cpp`, `publishState()` : `power` publié seulement dans 1..5 ; `fan_level`,
+  `fan2`, `fan3` seulement dans 1..6 (6 → `Auto` pour fan2/fan3) ; chaque réglage de
+  `HYDRO_NUMS` seulement s'il est dans `[mn, mx]` de la table.
+- Les `value_template` de `power`, `fan2`/`fan3` et des numbers hydro tolèrent une clé
+  absente (`... if value_json.x is defined else ''`), comme le select `fan`.
+- `unique_id`, adresses de registres, écritures et plages de découverte inchangés.
+
+Ces gardes **masquent** les valeurs aberrantes de `power` et des réglages hydro ; leur
+cause reste à établir par lecture série : `r 03E9 20`, `r 03F3 4`, `r 0403 1`, `r 040F 1`.
+Piste : `g_caps.hydro` est vrai à tort sur ce poêle AIR, d'où des numbers hydro exposés
+alors que ces registres n'y ont pas la même signification.
+
+## 12. Build de diagnostic `esp32dev_diag` : origine des valeurs aberrantes
+
+Les valeurs aberrantes vues dans HA (power 14, hystérésis 1020,4 / 3193,4, pump_min_on 179,2,
+water_set 0) n'ont pas pu être reproduites sur la série. Le suspect (non prouvé) est
+`ovenApplyReg` appelé depuis l'image `##` (`main.cpp`, base 0x02BA, jusqu'à 768 octets), qui
+écrit sans condition tous les registres, y compris `REG_MAXPOT_IDRO` (donc `g_caps.hydro`).
+Ce build l'observe sans rien filtrer ; les gardes du §11 restent actives.
+
+**Contenu** (tout sous `#ifdef MCZ_DIAG` ; le build `esp32dev` normal n'en contient aucune
+chaîne : `strings firmware.elf | grep -c 'debug/attrs'` = 0) :
+- `src/diag.h` / `src/diag.cpp` : file de 8 événements en tampons statiques (aucune allocation,
+  verrou `portMUX`), alimentée depuis le callback BLE, vidée depuis `loop` par `netTick`.
+- `main.cpp` : `DIAG_SRC` marque l'origine de chaque lot d'appels à `ovenApplyReg` (`##`, `03`,
+  `06`) ; `DIAG_CHECK` en tête de `ovenApplyReg` ; `DIAG_CAPS` sur `REG_MAXPOT_IDRO` ;
+  `DIAG_HASH` copie l'image `##` (memcpy borné) à la réception.
+- `net_mqtt.cpp` : entité unique `sensor` « Diag pont » (`entity_category: diagnostic`, état =
+  compteur `n`), tous les messages sur `mcz/<id>/debug/attrs`, sans retain, 1 message/s au plus.
+
+**Événements** (JSON, `n` = compteur croissant ajouté à chaque message) :
+- `rej` : valeur brute hors plage attendue (hystérésis 0-20, pump_min_on 20-90, water_set 30-85,
+  power 1-5, ventilateurs > 6 ; 0xFFFF de `set_puffer` ignoré). Dédoublonné par registre+valeur,
+  1 par 30 s. Champs : `reg`, `raw` (brut avant ÷10), `src`, `up`, `lastRead`, `lastCount`, `hydro`.
+- `caps` : `g_caps.hydro` change (prioritaire, hors limite de débit) : `hydro`, `src`, `raw`, `up`.
+- `hash` : image `##` en parties de 256 octets (`seq`, `part` à partir de 0, `parts`, `len`,
+  `off`, `base`, `hex`), 1 partie/s ; 1 image max / 10 min, 20 max par démarrage, la première
+  toujours retenue.
+- `hb` : toutes les 10 min (et une fois à la première connexion MQTT) : `up`, `hashes` (images
+  retenues), `rx` (images `##` reçues), `rej`, `drop` (file pleine), `rl` (limite 30 s), `hydro`.
+
+**MQTT coupé** : `netTick` ne vide pas la file, qui se remplit puis perd les nouveaux
+événements (compteur `drop`, publié dans `hb`) ; une image `##` en attente reste en tampon et
+bloque les suivantes. Rien ne s'accumule, rien ne bloque. Un `publish` raté n'est pas rejoué.
+
+**Flash** : `platformio run -e esp32dev_diag -t upload --upload-port <port>`.
+
+**Retrait** : reflasher le build normal (`-e esp32dev`), puis supprimer l'entité en publiant un
+payload vide retenu sur `<HA_DISCOVERY_PREFIX>/sensor/<id>_diag/config` (par exemple
+`mosquitto_pub -r -n -t '<prefix>/sensor/<id>_diag/config'`). Vider aussi le topic
+`mcz/<id>/debug/attrs` n'est pas nécessaire (non retenu).

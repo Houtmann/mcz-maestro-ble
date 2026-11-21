@@ -6,3 +6,6 @@ src/config.h
 
 .vscode/
 .DS_Store
+
+# Mémoire locale engram
+.engram/

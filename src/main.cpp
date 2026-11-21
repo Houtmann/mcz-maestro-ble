@@ -28,6 +28,7 @@
 #include "net_mqtt.h"
 #include "display.h"
 #include "appconfig.h"
+#include "diag.h"        // build diagnostic (MCZ_DIAG) : macros vides sinon
 #include "ble_api.h"
 #include "chrono.h"
 #if defined(__has_include)
@@ -200,6 +201,7 @@ static bool counterPlausible(CounterGuard& g, const char* what, int32_t prev, in
   return false;
 }
 void ovenApplyReg(uint16_t reg, uint16_t val){
+  DIAG_CHECK(reg, val);              // diagnostic : evenement si hors plage attendue (aucun effet sur le decodage)
   static uint16_t workLo = 0;        // low word of the 32-bit work time (persists between calls)
   // Time in power level 1..5 (0x0336..0x033F): 5x 32-bit MINUTES, low word first.
   // (Pas des secondes : divise par 60, le compteur total donnait 37 h pour 496 allumages,
@@ -230,7 +232,7 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
   }
   switch(reg){
     // ---- Capability registers (filled once during capScan, see below) ----
-    case REG_MAXPOT_IDRO: g_caps.maxPotIdro=val; g_caps.hydro=(val!=SENTINEL16 && val>0); break;
+    case REG_MAXPOT_IDRO: DIAG_CAPS((val!=SENTINEL16 && val>0), val); g_caps.maxPotIdro=val; g_caps.hydro=(val!=SENTINEL16 && val>0); break;
     case REG_SET_BOILER:  g_caps.boiler=(val!=SENTINEL16); break;
     case REG_SET_PUFFER: { g_caps.puffer=(val!=SENTINEL16);
         float c=(val==SENTINEL16)?NAN:val/10.0f;
@@ -255,7 +257,7 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_BOARD:   { float c=val/10.0f; if(g_oven.boardC!=c)   {g_oven.boardC=c;    bumpSeq();} } break;
     case REG_FUMES:   { float c=val/10.0f; if(g_oven.fumesC!=c)   {g_oven.fumesC=c;    bumpSeq();} } break;
     case REG_SETPOINT:{ float c=val/10.0f; if(g_oven.setpointC!=c){g_oven.setpointC=c; bumpSeq();} } break;
-    case REG_POWER:    if(g_oven.power !=(int8_t)val){ g_oven.power =(int8_t)val; bumpSeq(); } break;
+    case REG_POWER:    if(val>=1 && val<=5 && g_oven.power !=(int8_t)val){ g_oven.power =(int8_t)val; bumpSeq(); } break;   // hors 1..5 : ignore (voir PATCHES §11)
     case REG_MODE:                                                   // setting + live mirror
     case REG_MODE_LIVE:if(g_oven.mode  !=(int8_t)val){ g_oven.mode  =(int8_t)val; bumpSeq(); } break;
     case REG_STATE:    if(g_oven.state !=(int32_t)val){
@@ -466,6 +468,8 @@ static void notifyCB(NimBLERemoteCharacteristic*, uint8_t *data, size_t len, boo
     if (plen > sizeof(g_status)) plen = sizeof(g_status);
     memcpy(g_status, pt+20, plen); g_statusLen = plen;
     g_statusCtr = pt[0]|(pt[1]<<8)|(pt[2]<<16)|((uint32_t)pt[3]<<24);
+    DIAG_HASH(g_status, g_statusLen, STATUS_BASE);              // diagnostic : capture bornee de l'image
+    DIAG_SRC("##");
     for (size_t i=0; i+1 < plen; i+=2)                         // whole image -> OvenState
       ovenApplyReg(STATUS_BASE + (uint16_t)(i/2), (g_status[i]<<8)|g_status[i+1]);
     int rt=regVal(0x02BC), ph=regVal(0x0322);
@@ -506,6 +510,7 @@ static void notifyCB(NimBLERemoteCharacteristic*, uint8_t *data, size_t len, boo
       return;
     }
     if (g_logRaw) Serial.printf("       %u data bytes (%u registers 16bit): ", bc, bc/2);
+    DIAG_SRC("03");
     for (uint8_t i=0;i+1<bc;i+=2) {
       uint16_t r = (mb[3+i]<<8)|mb[3+i+1];
       if (g_logRaw) Serial.printf("%u ", r);
@@ -526,6 +531,7 @@ static void notifyCB(NimBLERemoteCharacteristic*, uint8_t *data, size_t len, boo
   } else if (mbLen>=6 && mb[1]==0x06) {
     uint16_t reg=(mb[2]<<8)|mb[3], val=(mb[4]<<8)|mb[5];
     Serial.printf("       WRITE echo reg=0x%04X val=0x%04X (accepted)\n", reg, val);
+    DIAG_SRC("06");
     ovenApplyReg(reg, val);                                    // WRITE echo confirmed -> apply
   }
 }

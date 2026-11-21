@@ -12,6 +12,7 @@
 #include "config.h"
 #include "appconfig.h"
 #include "oven.h"
+#include "diag.h"
 #if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
 #include <WebServer.h>   // apres config.h : la macro doit etre connue
 #endif
@@ -26,6 +27,9 @@ static PubSubClient mqtt(wifiClient);
 
 static String T_BASE, T_STATE, T_AVAIL, T_SET_TEMP, T_SET_POWER, T_SET_MODE, T_SET_ONOFF, T_SET_FAN, T_SET_SILENT;
 static String g_id, g_devName;
+#ifdef MCZ_DIAG
+static String T_DEBUG;                 // mcz/<id>/debug/attrs : tous les evenements de diagnostic, sans retain
+#endif
 
 static bool     g_idReady     = false;
 static String   g_discSerial;                  // serial number that was in the last discovery
@@ -71,6 +75,9 @@ static bool buildIdentity(){
   T_BASE      = String("mcz/") + g_id;
   T_STATE     = T_BASE + "/state";
   T_AVAIL     = T_BASE + "/availability";
+#ifdef MCZ_DIAG
+  T_DEBUG     = T_BASE + "/debug/attrs";
+#endif
   T_SET_TEMP  = T_BASE + "/set/temp";
   T_SET_POWER = T_BASE + "/set/power";
   T_SET_MODE  = T_BASE + "/set/mode";
@@ -146,7 +153,7 @@ static void publishDiscovery(){
     pm.add("Comfort"); pm.add("Overnight"); pm.add("Turbo"); pm.add("Auto"); pm.add("Manual");
     d["preset_mode_command_topic"]  = T_SET_MODE;
     d["preset_mode_state_topic"]    = T_STATE;
-    d["preset_mode_state_template"] = "{{ value_json.mode_name }}";
+    d["preset_mode_value_template"] = "{{ value_json.mode_name }}";
     addDevice(d.as<JsonObject>());
     publishJson(discoTopic("climate", "climate"), d, true);
   }
@@ -157,7 +164,7 @@ static void publishDiscovery(){
     d["availability_topic"] = T_AVAIL;
     d["command_topic"] = T_SET_POWER;
     d["state_topic"]   = T_STATE;
-    d["value_template"]= "{{ value_json.power }}";
+    d["value_template"]= "{{ value_json.power if value_json.power is defined else '' }}";
     d["min"] = 1; d["max"] = 5; d["step"] = 1; d["mode"] = "slider";
     addDevice(d.as<JsonObject>());
     publishJson(discoTopic("number", "power"), d, true);
@@ -191,7 +198,7 @@ static void publishDiscovery(){
     d["availability_topic"] = T_AVAIL;
     d["command_topic"] = T_BASE + "/set/" + oid;
     d["state_topic"]   = T_STATE;
-    d["value_template"]= String("{{ value_json.") + oid + " | default('') }}";
+    d["value_template"]= String("{{ value_json.") + oid + " if value_json." + oid + " is defined else '' }}";
     JsonArray op = d["options"].to<JsonArray>();
     op.add("Auto");
     for (int i=1;i<=fanLevels;i++){ char b[4]; snprintf(b,sizeof(b),"%d",i); op.add(b); }
@@ -224,7 +231,7 @@ static void publishDiscovery(){
     d["availability_topic"] = T_AVAIL;
     d["command_topic"] = T_BASE + "/set/" + h.oid;
     d["state_topic"]   = T_STATE;
-    d["value_template"]= String("{{ value_json.") + h.oid + " }}";
+    d["value_template"]= String("{{ value_json.") + h.oid + " if value_json." + h.oid + " is defined else '' }}";
     d["min"] = h.mn; d["max"] = h.mx; d["step"] = h.step;
     d["unit_of_measurement"] = "°C"; d["mode"] = "box"; d["entity_category"] = "config";
     addDevice(d.as<JsonObject>());
@@ -262,6 +269,16 @@ static void publishDiscovery(){
     d["icon"]="mdi:history";
     addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","alarm_hist"), d, true);
   }
+#ifdef MCZ_DIAG
+  { JsonDocument d;                              // entite unique du build diagnostic (PATCHES §12)
+    d["name"]="Diag pont"; d["unique_id"]=g_id+"_diag";
+    d["availability_topic"]=T_AVAIL; d["state_topic"]=T_DEBUG;
+    d["value_template"]="{{ value_json.n }}";
+    d["json_attributes_topic"]=T_DEBUG;
+    d["entity_category"]="diagnostic"; d["icon"]="mdi:bug-outline";
+    addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","diag"), d, true);
+  }
+#endif
 }
 
 static void publishState(){
@@ -270,7 +287,7 @@ static void publishState(){
   if (!isnan(g_oven.setpointC)) d["setpoint"] = roundf(g_oven.setpointC*10)/10.0;
   if (!isnan(g_oven.boardC))    d["board"]    = roundf(g_oven.boardC*10)/10.0;
   if (!isnan(g_oven.fumesC))    d["fumes"]    = roundf(g_oven.fumesC*10)/10.0;
-  if (g_oven.power>=0)          d["power"]    = g_oven.power;
+  if (g_oven.power>=1 && g_oven.power<=5) d["power"]    = g_oven.power;
   if (g_oven.mode>=0){ d["mode"] = g_oven.mode; d["mode_name"] = modeName(g_oven.mode); }
   if (g_oven.phase>=0){ d["phase"] = g_oven.phase; d["running"] = ovenRunning(); }
   if (g_oven.state>=0){
@@ -279,9 +296,9 @@ static void publishState(){
     if (sn[0]) d["phase_name"] = sn;
     else { char b[12]; snprintf(b,sizeof(b),"0x%04X",(unsigned)g_oven.state); d["phase_name"] = b; }
   }
-  if (g_oven.fanLevel>=0)      d["fan_level"] = g_oven.fanLevel;
-  if (g_oven.fan2Set>=0)       d["fan2"] = (g_oven.fan2Set==6) ? String("Auto") : String((int)g_oven.fan2Set);
-  if (g_oven.fan3Set>=0)       d["fan3"] = (g_oven.fan3Set==6) ? String("Auto") : String((int)g_oven.fan3Set);
+  if (g_oven.fanLevel>=1 && g_oven.fanLevel<=6) d["fan_level"] = g_oven.fanLevel;
+  if (g_oven.fan2Set>=1 && g_oven.fan2Set<=6) d["fan2"] = (g_oven.fan2Set==6) ? String("Auto") : String((int)g_oven.fan2Set);
+  if (g_oven.fan3Set>=1 && g_oven.fan3Set<=6) d["fan3"] = (g_oven.fan3Set==6) ? String("Auto") : String((int)g_oven.fan3Set);
   if (g_oven.fanRoom>=0)       d["fan_room"]  = g_oven.fanRoom;   // flue gas fan RPM
   if (g_oven.fanComb>=0)       d["fan_comb"]  = g_oven.fanComb;   // combustion fan RPM
   if (g_oven.active>=0)        d["active"]    = g_oven.active;    // app value "active"
@@ -320,7 +337,7 @@ static void publishState(){
     if (g_caps.puffer && !isnan(g_oven.pufferC)) d["puffer_temp"] = roundf(g_oven.pufferC*10)/10.0;
     if (g_caps.hydro) for (int i=0;i<HYDRO_NUM_CNT;i++){   // hydro settings
       float v = hydroVal(HYDRO_NUMS[i].reg);
-      if (!isnan(v)) d[HYDRO_NUMS[i].oid] = roundf(v*10)/10.0;
+      if (!isnan(v) && v>=HYDRO_NUMS[i].mn && v<=HYDRO_NUMS[i].mx) d[HYDRO_NUMS[i].oid] = roundf(v*10)/10.0;
     }
   }
   publishJson(T_STATE, d, true);
@@ -490,6 +507,11 @@ void netTick(){
   if (changed || now - g_lastPubMs > HEARTBEAT_MS){
     publishState(); g_lastPubSeq = g_oven.seq; g_lastPubMs = now;
   }
+#ifdef MCZ_DIAG
+  { static char dbuf[720];                       // 1 message / s au plus ; perdu si le publish echoue (pas de reessai)
+    size_t n = diagNext(dbuf, sizeof dbuf);
+    if (n) mqtt.publish(T_DEBUG.c_str(), (const uint8_t*)dbuf, n, false); }
+#endif
 }
 
 bool netWifiUp(){ return WiFi.status()==WL_CONNECTED; }
