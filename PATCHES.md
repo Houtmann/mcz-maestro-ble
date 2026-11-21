@@ -344,12 +344,14 @@ du core Arduino).
   toolchains), `ota.sh <ip> [env]` (build puis `curl -u admin:...` ; mot de passe via
   `$OTA_PASSWORD` ou saisie masquée, transmis à curl par stdin, jamais écrit ni affiché).
 
-**Partitions : bloquant en l'état.** `platformio.ini` fixe `board_build.partitions = huge_app.csv`
-(un seul slot `app0` de 3 Mo, **pas d'OTA**) : `Update.begin` échoue, l'envoi est rejeté (500).
-Il faut une table à deux slots, par ex. `default.csv` (app0/app1 de 1,25 Mo ; le firmware
-`esp32dev` fait 1,10 Mo, `cyd` 1,4 Mo ne rentre pas). Ce changement n'est **pas** fait ici : il
-impose un flash USB complet. Il se fait à la main : `board_build.partitions = default.csv`
-dans `[env:esp32dev]` (ou `[env]`).
+**Partitions.** `esp32dev` et `esp32dev_diag` utilisent `default.csv` (deux slots OTA `app0` /
+`app1` de 0x140000 = 1 310 720 octets, `otadata` en 0xE000). `cyd` garde `huge_app.csv` (un seul
+slot de 3 Mo, **pas d'OTA sur cyd** : son firmware fait 1,4 Mo, trop gros pour un slot). `nvs`
+est identique dans les deux tables (0x9000, taille 0x5000) : les réglages NVS (WiFi, MQTT,
+cible) survivent au changement. Seul `spiffs` bouge (non utilisé). Marge flash : l'image
+`esp32dev` occupe 1 102 313 octets sur 1 310 720 (84,1 %), `firmware.bin` = 1 108 896 octets ;
+`esp32dev_diag` 1 105 469 (84,3 %). Marge d'environ 200 Ko : à surveiller à chaque ajout.
+**Le changement de table impose un flash USB complet, avec le nouveau `partitions.bin`.**
 
 **Premier flash USB** (navigateur, esptool-js), fichiers produits par `build.sh esp32dev` dans
 `mcz-maestro-ble/.pio/build/esp32dev/`, mêmes offsets quelle que soit la table :
@@ -361,7 +363,7 @@ dans `[env:esp32dev]` (ou `[env]`).
 | 0xE000 | `boot_app0.bin` (framework : `packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin` dans le volume Docker `pio-cache`) |
 | 0x10000 | `firmware.bin` |
 
-`partitions.bin` doit venir d'un build fait **avec** la table à deux slots. Pour extraire
+`partitions.bin` est celui du build `esp32dev` actuel (table `default.csv`) : il doit être flashé au premier flash USB, sans quoi l'OTA reste impossible. Pour extraire
 `boot_app0.bin` : `docker run --rm -v pio-cache:/c -v "$PWD":/out python:3.12-slim cp /c/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin /out/`.
 Ensuite, mises à jour par `ota.sh`. Vérifié : compilation `esp32dev` (OTA désactivée) et
 `esp32dev_diag` avec `-DOTA_PASSWORD=\"x\"` (OTA compilée) ; **non testé sur le matériel**.

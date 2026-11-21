@@ -64,5 +64,5 @@
 // ---- Mise a jour OTA par HTTP (PATCHES.md §14) ------------------------------
 // POST http://<ip>/update (multipart, champ `firmware`), Basic Auth, utilisateur `admin`.
 // Mot de passe ci-dessous ; absent ou "" = OTA desactivee. Valeur bidon : a changer.
-// Necessite une table de partitions avec deux slots OTA (pas huge_app.csv).
+// Necessite une table de partitions a deux slots OTA (esp32dev : default.csv ; pas cyd).
 #define OTA_PASSWORD   "change-me"
