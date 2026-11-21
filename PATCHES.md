@@ -271,3 +271,51 @@ bloque les suivantes. Rien ne s'accumule, rien ne bloque. Un `publish` raté n'e
 payload vide retenu sur `<HA_DISCOVERY_PREFIX>/sensor/<id>_diag/config` (par exemple
 `mosquitto_pub -r -n -t '<prefix>/sensor/<id>_diag/config'`). Vider aussi le topic
 `mcz/<id>/debug/attrs` n'est pas nécessaire (non retenu).
+
+## 13. Alignement sur la table officielle des registres
+
+Source : `docs/mcz_m2_registers_en.csv` (sub_byte 0 = octet haut, 1 = octet bas ; type 3 =
+16 bits ÷10 signé, 4 = uint16, 5 = uint32 sur 2 registres mot bas d'abord, 7 = flags 32 bits).
+Les commentaires d'adresses de `oven.h` citent désormais la clé CSV.
+
+**Libellés faux corrigés** (bloc de polling `0x02BC` ×51 = 700-750, donc aucune lecture BLE
+ajoutée) :
+
+| Registre | Avant | Réalité (clé CSV) |
+|---|---|---|
+| 0x02C9 (713) | « Active » | `pressione` : pression d'air, type 3 ÷10, unité inconnue |
+| 0x02C8 (712) | non lu | `pressione_pascal` : pression d'air en Pa, type 3 ÷10 |
+| 0x02CE (718) | « Combustion fan RPM » | `vel_imp_coclea` : **consigne** vitesse vis sans fin |
+| 0x02CF (719) | non lu | `vel_real_coclea` : vitesse réelle vis sans fin |
+| 0x02D1 (721) | « Flue gas fan RPM » | `vel_imp_ventola_fumi` : **consigne** ventilateur fumées |
+| 0x02D2 (722) | non lu | `vel_real_ventola_fumi` : vitesse réelle ventilateur fumées |
+
+Entités Home Assistant (préfixe `unique_id` = `<id>_`) :
+- **Supprimées** (config de découverte vide retenue, republiée à chaque connexion MQTT) :
+  `active` (« Active ») et `fan_comb` (« Combustion fan ») : leur sens réel était autre.
+- **Conservée, renommée** : `fan_room` garde son `unique_id` ; nom « Flue gas fan setpoint »
+  (c'était déjà 0x02D1, la consigne). Clé d'état `fan_room` → `fumes_fan_set`.
+- **Ajoutées** : `fumes_fan_speed` (0x02D2), `auger_set` (0x02CE), `auger_speed` (0x02CF),
+  `air_pressure_pa` (0x02C8, Pa, device_class `pressure`), `air_pressure` (0x02C9, brut ÷10,
+  sans unité), `power_actual` (0x0323 octet haut `potenza_att`, ignoré hors 0..5),
+  `service_h` (`ore_service` 846-847, h, diagnostic, rejeté > 100000), `reset_cause`
+  (`dia_res_cau` 849, diagnostic). Les vitesses ignorent 0xFFFF.
+- Clés d'état retirées : `fan_comb`, `active` ; la sortie série `status` suit.
+
+**Décodage** :
+- `flags` (0x0332, 32 bits) : passé de `int16_t` à `uint16_t` + `flagsOk` ; `ovenSilent()` ne
+  se trompait que si le bit 15 était posé (lu comme négatif). Comportement inchangé sinon.
+- 0x0372 : `g_caps.clima` teste l'octet bas (`stato_clima`) seulement ; l'octet haut est
+  `tipo_allarme_clima`. Seul usage de ce registre (affiché dans `status` / capScan).
+- Températures, consignes, hystérésis, pression : lues en `int16_t` avant ÷10. La sentinelle
+  0xFFFF de `set_puffer` est testée avant. `diag.cpp` (plages `rej`) suit le même décodage.
+
+**Non fait** : `cont_reset_pan` (877, compteur de resets panneau) est hors du bloc `0x0320` ×77
+(800-876) : non lu, rien publié. L'ajouter demande de passer le bloc à 78 registres (ou une
+lecture dédiée), à décider.
+
+**À vérifier par lecture série** (`status`, `r 02C8 8`, `r 034E 4`) : unité de `pressione`
+(713) et plage de `pressione_pascal` ; unité des vitesses vis sans fin et ventilateur
+fumées (« rpm » conservé sur les fumées seulement, par continuité) ; `ore_service` est-il
+bien un décompte en heures ; valeurs de `dia_res_cau` ; que `potenza_att` suit bien la
+puissance réelle ; si 0x0372 vaut 0 sur ce poêle AIR.

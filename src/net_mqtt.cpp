@@ -117,6 +117,12 @@ static void publishJson(const String& topic, JsonDocument& doc, bool retain){
 static String discoTopic(const char* component, const char* objectId){
   return String(HA_DISCOVERY_PREFIX) + "/" + component + "/" + g_id + "_" + objectId + "/config";
 }
+// Supprime une entite HA : config de decouverte vide, retenue, sur l'ancien topic.
+static void removeDiscovery(const char* component, const char* objectId){
+  String t = discoTopic(component, objectId);
+  mqtt.publish(t.c_str(), (const uint8_t*)"", 0, true);
+  mqtt.loop(); delay(2);
+}
 static void addSensor(const char* objectId, const char* name, const char* valTpl,
                       const char* unit, const char* devClass, const char* stateClass){
   JsonDocument d;
@@ -241,9 +247,18 @@ static void publishDiscovery(){
   addSensor("fumes", "Flue gas temperature", "{{ value_json.fumes }}",  "°C", "temperature", "measurement");
   addSensor("board", "Control board temperature", "{{ value_json.board }}", "°C", "temperature", "measurement");
   addSensor("room",  "Room temperature",     "{{ value_json.room }}",   "°C", "temperature", "measurement");
-  addSensor("fan_room", "Flue gas fan",  "{{ value_json.fan_room }}", "rpm", "", "measurement");
-  addSensor("fan_comb", "Combustion fan", "{{ value_json.fan_comb }}", "rpm", "", "measurement");
-  addSensor("active", "Active",             "{{ value_json.active }}", "", "", "measurement");
+  // Registres 718-722 / 712-713 : voir PATCHES §13. `fan_room` garde son unique_id (c'est bien
+  // 0x02D1 = consigne ventilateur fumees, seul le libelle etait imprecis). `fan_comb` et `active`
+  // lisaient autre chose que ce qu'ils annoncaient : supprimes, remplaces par des entites neuves.
+  addSensor("fan_room", "Flue gas fan setpoint", "{{ value_json.fumes_fan_set }}", "rpm", "", "measurement");
+  addSensor("fumes_fan_speed", "Flue gas fan speed", "{{ value_json.fumes_fan_speed }}", "rpm", "", "measurement");
+  addSensor("auger_set",   "Auger speed setpoint", "{{ value_json.auger_set }}",   "", "", "measurement");
+  addSensor("auger_speed", "Auger speed",          "{{ value_json.auger_speed }}", "", "", "measurement");
+  addSensor("air_pressure_pa", "Air pressure",     "{{ value_json.air_pressure_pa }}", "Pa", "pressure", "measurement");
+  addSensor("air_pressure",    "Air pressure (raw)", "{{ value_json.air_pressure }}", "", "", "measurement");
+  addSensor("power_actual", "Power (actual)",      "{{ value_json.power_actual }}", "", "", "measurement");
+  removeDiscovery("sensor", "fan_comb");   // ancien « Combustion fan » (0x02CE = consigne vis sans fin)
+  removeDiscovery("sensor", "active");     // ancien « Active » (0x02C9 = pression d'air)
   addSensor("phase", "Phase", "{{ value_json.phase_name }}", "", "", "");
   addSensor("ignitions", "Ignitions", "{{ value_json.ignitions }}", "", "", "total_increasing");
   addSensor("worktime", "Total working time", "{{ value_json.worktime_h }}", "h", "duration", "total_increasing");
@@ -277,6 +292,20 @@ static void publishDiscovery(){
     d["unit_of_measurement"]="dBm"; d["device_class"]="signal_strength"; d["state_class"]="measurement";
     d["entity_category"]="diagnostic";
     addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","rssi"), d, true);
+  }
+  { JsonDocument d;                              // ore_service (846-847) : heures avant entretien
+    d["name"]="Hours to service"; d["unique_id"]=g_id+"_service_h";
+    d["availability_topic"]=T_AVAIL; d["state_topic"]=T_STATE;
+    d["value_template"]="{{ value_json.service_h }}";
+    d["unit_of_measurement"]="h"; d["entity_category"]="diagnostic"; d["icon"]="mdi:wrench-clock";
+    addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","service_h"), d, true);
+  }
+  { JsonDocument d;                              // dia_res_cau (849) : cause de reset
+    d["name"]="Reset cause"; d["unique_id"]=g_id+"_reset_cause";
+    d["availability_topic"]=T_AVAIL; d["state_topic"]=T_STATE;
+    d["value_template"]="{{ value_json.reset_cause }}";
+    d["entity_category"]="diagnostic"; d["icon"]="mdi:restart-alert";
+    addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","reset_cause"), d, true);
   }
   // Alarm log (all ovens): last alarm + history (raw Axx codes; meanings are model-specific)
   { JsonDocument d;
@@ -324,10 +353,16 @@ static void publishState(){
   if (g_oven.fanLevel>=1 && g_oven.fanLevel<=6) d["fan_level"] = g_oven.fanLevel;
   if (g_oven.fan2Set>=1 && g_oven.fan2Set<=6) d["fan2"] = (g_oven.fan2Set==6) ? String("Auto") : String((int)g_oven.fan2Set);
   if (g_oven.fan3Set>=1 && g_oven.fan3Set<=6) d["fan3"] = (g_oven.fan3Set==6) ? String("Auto") : String((int)g_oven.fan3Set);
-  if (g_oven.fanRoom>=0)       d["fan_room"]  = g_oven.fanRoom;   // flue gas fan RPM
-  if (g_oven.fanComb>=0)       d["fan_comb"]  = g_oven.fanComb;   // combustion fan RPM
-  if (g_oven.active>=0)        d["active"]    = g_oven.active;    // app value "active"
-  if (g_oven.flags>=0){ d["chrono"] = (g_oven.flags>>6)&1; d["silent"] = (g_oven.flags>>5)&1; }
+  if (g_oven.fumesFanSet>=0)   d["fumes_fan_set"]   = g_oven.fumesFanSet;    // 0x02D1 consigne ventilateur fumees
+  if (g_oven.fumesFanReal>=0)  d["fumes_fan_speed"] = g_oven.fumesFanReal;   // 0x02D2 vitesse reelle
+  if (g_oven.augerSet>=0)      d["auger_set"]   = g_oven.augerSet;           // 0x02CE consigne vis sans fin
+  if (g_oven.augerReal>=0)     d["auger_speed"] = g_oven.augerReal;          // 0x02CF vitesse reelle
+  if (!isnan(g_oven.pressurePa)) d["air_pressure_pa"] = roundf(g_oven.pressurePa*10)/10.0;  // 0x02C8, Pa
+  if (!isnan(g_oven.pressure))   d["air_pressure"]    = roundf(g_oven.pressure*10)/10.0;    // 0x02C9, unite inconnue
+  if (g_oven.powerNow>=0)      d["power_actual"] = g_oven.powerNow;          // 0x0323 octet haut
+  if (g_oven.serviceH>=0)      d["service_h"]    = g_oven.serviceH;          // 0x034E-F, heures
+  if (g_oven.resetCause>=0)    d["reset_cause"]  = g_oven.resetCause;        // 0x0351
+  if (g_oven.flagsOk){ d["chrono"] = (g_oven.flags>>6)&1; d["silent"] = (g_oven.flags>>5)&1; }
   if (g_oven.ignitions>=0)   d["ignitions"]    = g_oven.ignitions;
   // Compteurs internes en minutes, publies en heures a 2 decimales (resolution 1 min).
   if (g_oven.worktimeMin>=0) d["worktime_h"] = serialized(String(g_oven.worktimeMin/60.0, 2));

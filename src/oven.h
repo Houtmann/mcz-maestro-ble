@@ -29,17 +29,27 @@ static const uint16_t REG_FUMES    = 0x02C5;  // Flue gas temp ÷10
 static const uint16_t REG_STATE    = 0x0320;  // Fine phase/state (16-bit code, see stateName)
 static const uint16_t REG_PHASE    = 0x0322;  // coarse: 1=Off/Standby, 3=On (incl. start sequence)
 static const uint16_t REG_MODE_LIVE= 0x032E;  // Operating mode mirror (same enum 0..4)
-static const uint16_t REG_ALARM    = 0x0323;  // tipo_allarme = LOW byte (0 = no active alarm)
+static const uint16_t REG_ALARM    = 0x0323;  // 803: LOW byte = tipo_allarme (0 = no active alarm),
+                                              // HIGH byte = potenza_att (puissance reellement en cours)
 static const uint16_t REG_ALARM_IDX= 0x07EA;  // index_allarme (hi) / num_allarmi (lo) — alarm log head
-static const uint16_t REG_FLAGS    = 0x0332;  // Bit field: Bit6=Chrono, Bit5=Silent
+static const uint16_t REG_FLAGS    = 0x0332;  // flags (818-819, 32 bits, mot bas d'abord) : on ne lit que 818.
+                                              // Bit field: Bit6=Chrono, Bit5=Silent
 static const uint16_t REG_IGNIT    = 0x0334;  // Ignition counter
 static const uint16_t REG_WORK_LO  = 0x0340;  // Total working time (minutes, 32-bit LE word)
 static const uint16_t REG_WORK_HI  = 0x0341;
 static const uint16_t REG_PTIME_LO = 0x0336;  // Time in power 1..5: 5x 32-bit (minutes),
 static const uint16_t REG_PTIME_HI = 0x033F;  // low word first, 0x0336..0x033F
-static const uint16_t REG_ACTIVE   = 0x02C9;  // App value "active" 
-static const uint16_t REG_FAN_COMB = 0x02CE;  // Combustion fan RPM
-static const uint16_t REG_FAN_ROOM = 0x02D1;  // Flue gas/exhaust fan RPM
+// Bloc 0x02BC x51 (700-750), cles de docs/mcz_m2_registers_en.csv (table status) :
+static const uint16_t REG_PRESSURE_PA = 0x02C8; // 712 pressione_pascal : pression d'air, Pa, type 3 (÷10, signe)
+static const uint16_t REG_PRESSURE    = 0x02C9; // 713 pressione : pression d'air, type 3 (÷10, signe), unite inconnue
+static const uint16_t REG_AUGER_SET   = 0x02CE; // 718 vel_imp_coclea : consigne vitesse vis sans fin (uint16)
+static const uint16_t REG_AUGER_REAL  = 0x02CF; // 719 vel_real_coclea : vitesse reelle vis sans fin (uint16)
+static const uint16_t REG_FUMES_FAN_SET  = 0x02D1; // 721 vel_imp_ventola_fumi : consigne ventilateur fumees (uint16)
+static const uint16_t REG_FUMES_FAN_REAL = 0x02D2; // 722 vel_real_ventola_fumi : vitesse reelle ventilateur fumees (uint16)
+// Bloc 0x0320 x77 (800-876) :
+static const uint16_t REG_SERVICE_LO  = 0x034E; // 846-847 ore_service : heures avant entretien (uint32, mot bas d'abord)
+static const uint16_t REG_SERVICE_HI  = 0x034F;
+static const uint16_t REG_RESET_CAUSE = 0x0351; // 849 dia_res_cau : cause de reset (uint16, diagnostic)
 static const uint16_t REG_FAN_SET  = 0x03FA;  // Write: 1..5 = fixed level, 6 = auto ventilation
 static const uint16_t REG_FAN2_SET = 0x03FB;  // set_vent_v2 : 2nd (ducted) fan, same encoding
 static const uint16_t REG_FAN3_SET = 0x03FC;  // set_vent_v3 : 3rd (ducted) fan, same encoding
@@ -50,7 +60,7 @@ static const uint16_t REG_HYST_AMB_NEG = 0x03F3; // ist_neg_amb: ambient hystere
 static const uint16_t REG_HYST_AMB_POS = 0x03F4; // ist_pos_amb: ambient hysteresis positive
 static const uint16_t REG_HYST_SS_NEG  = 0x03F5; // ist_eco_neg_amb: Start/Stop (Ecostop) hysteresis neg
 static const uint16_t REG_HYST_SS_POS  = 0x03F6; // ist_eco_pos_amb: Start/Stop (Ecostop) hysteresis pos
-static const uint16_t REG_PUMP_MIN_ON  = 0x0403; // temp_min_circ_on: circulation pump min on-temperature
+static const uint16_t REG_PUMP_MIN_ON  = 0x0403; // 1027 temp_min_circ_on: circulation pump min on-temperature
 
 // ---- Capability detection (which hardware the stove actually has) -----------
 // Register numbers from the app decoder (libencdec.so) = Modbus addresses.
@@ -63,7 +73,7 @@ static const uint16_t REG_VVEN1_HI    = 0x05FF;  //   (byte-packed; count of non
 static const uint16_t REG_TIPO_APP    = 0x06A4;  // tipo_app (1700): device type id
 static const uint16_t REG_ABI_VEN12   = 0x06F4;  // abi_ven1/2_tlc_app (1780): fan-enable bytes
 static const uint16_t REG_ABI_VEN34   = 0x06F5;  // abi_ven3/4_tlc_app (1781)
-static const uint16_t REG_CLIMA       = 0x0372;  // stato_clima (882): conditioner block
+static const uint16_t REG_CLIMA       = 0x0372;  // 882: HIGH byte = tipo_allarme_clima, LOW byte = stato_clima (0 = absent)
 static const uint16_t REG_BANCADATI   = 0x07C6;  // rev_banca_dati (1990) + banca_dati name (1991..1998)
 static const uint16_t SENTINEL16      = 0xFFFF;
 
@@ -97,19 +107,26 @@ struct OvenState {
   float    pumpMinOn  = NAN;   // Circulation pump min on-temperature (0x0403)
   float    pufferSet  = NAN;   // Buffer/water setpoint set_puffer (0x0412)
   float    boardC     = NAN;   // Control board temperature
+  float    pressurePa = NAN;   // Air pressure, Pa (0x02C8 pressione_pascal)
+  float    pressure   = NAN;   // Air pressure, unite inconnue (0x02C9 pressione)
   float    fumesC     = NAN;   // Flue gas temperature
   float    setpointC  = NAN;   // Setpoint temperature
   int8_t   power      = -1;    // Power 1..5
   int8_t   mode       = -1;    // 0=Manual,1=Auto,2=Overnight,3=Comfort,4=Turbo
   int8_t   phase      = -1;    // coarse 0x0322: 1=Off, 3=On
   int32_t  state      = -1;    // Fine phase 0x0320 (code, see stateName)
-  int16_t  flags      = -1;    // Bit field 0x0332
+  uint16_t flags      = 0;     // Bit field 0x0332 (non signe : bit 15 = bit de flag, pas un signe)
+  bool     flagsOk    = false; // flags valide (lu au moins une fois)
   int32_t  ignitions  = -1;    // Ignitions
   int32_t  worktimeMin= -1;    // Total working time in minutes
   int32_t  powerTimeMin[5] = {-1,-1,-1,-1,-1};  // Time in power 1..5 (minutes)
-  int32_t  fanComb    = -1;    // Combustion fan RPM
-  int32_t  fanRoom    = -1;    // Flue gas fan RPM
-  int32_t  active     = -1;    // App value "active" (0x02C9)
+  int32_t  augerSet   = -1;    // Auger speed setpoint (0x02CE vel_imp_coclea)
+  int32_t  augerReal  = -1;    // Auger actual speed (0x02CF vel_real_coclea)
+  int32_t  fumesFanSet  = -1;  // Flue gas fan setpoint (0x02D1 vel_imp_ventola_fumi)
+  int32_t  fumesFanReal = -1;  // Flue gas fan actual speed (0x02D2 vel_real_ventola_fumi)
+  int8_t   powerNow   = -1;    // potenza_att (0x0323 high byte): puissance en cours 0..5
+  int32_t  serviceH   = -1;    // ore_service (0x034E-F): heures avant entretien
+  int32_t  resetCause = -1;    // dia_res_cau (0x0351): cause de reset
   int8_t   fanLevel   = -1;    // Live control fan level (0x0324), 1..5
   int8_t   fan2Set    = -1;    // set_vent_v2 (0x03FB): 1..5, 6 = Auto
   int8_t   fan3Set    = -1;    // set_vent_v3 (0x03FC): 1..5, 6 = Auto
@@ -128,7 +145,7 @@ extern String g_ovenSerial;  // Serial number from register 0x0ADC (ASCII) -> di
 extern String g_adcHex;      // Raw bytes of 0x0ADC as hex (diagnostic, if no ASCII serial)
 
 inline bool ovenRunning(){ return g_oven.phase == 3; }
-inline bool ovenSilent(){ return g_oven.flags >= 0 && ((g_oven.flags >> 5) & 1); }  // Flags Bit5
+inline bool ovenSilent(){ return g_oven.flagsOk && ((g_oven.flags >> 5) & 1); }  // Flags Bit5
 static const int OVEN_MODE_COUNT = 5;
 inline const char* modeName(int m){
   switch(m){ case 0:return "Manual";  case 1:return "Auto";  case 2:return "Overnight";

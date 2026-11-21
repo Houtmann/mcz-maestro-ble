@@ -204,6 +204,7 @@ static bool counterPlausible(CounterGuard& g, const char* what, int32_t prev, in
 void ovenApplyReg(uint16_t reg, uint16_t val){
   DIAG_CHECK(reg, val);              // diagnostic : evenement si hors plage attendue (aucun effet sur le decodage)
   static uint16_t workLo = 0;        // low word of the 32-bit work time (persists between calls)
+  static uint16_t serviceLo = 0;     // low word de ore_service (846)
   // Time in power level 1..5 (0x0336..0x033F): 5x 32-bit MINUTES, low word first.
   // (Pas des secondes : divise par 60, le compteur total donnait 37 h pour 496 allumages,
   // alors qu'une seule sequence d'allumage dure ~8 min. Les valeurs etaient donc des heures.)
@@ -236,10 +237,10 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_MAXPOT_IDRO: DIAG_CAPS((val!=SENTINEL16 && val>0), val); g_caps.maxPotIdro=val; g_caps.hydro=(val!=SENTINEL16 && val>0); break;
     case REG_SET_BOILER:  g_caps.boiler=(val!=SENTINEL16); break;
     case REG_SET_PUFFER: { g_caps.puffer=(val!=SENTINEL16);
-        float c=(val==SENTINEL16)?NAN:val/10.0f;
+        float c=(val==SENTINEL16)?NAN:(int16_t)val/10.0f;
         if(g_oven.pufferSet!=c && !(isnan(g_oven.pufferSet)&&isnan(c))){ g_oven.pufferSet=c; bumpSeq(); } } break;
     case REG_TIPO_APP:    g_caps.tipoApp=val; break;
-    case REG_CLIMA:       g_caps.clima=(val!=0 && val!=SENTINEL16); break;
+    case REG_CLIMA:       g_caps.clima=((val&0xFF)!=0 && val!=SENTINEL16); break;   // octet BAS = stato_clima (haut = tipo_allarme_clima)
     case REG_ABI_VEN12:   g_caps.fanCount = (uint8_t)(((val&0xFF)!=0)+((val>>8)!=0)); break;   // fan1/2
     case REG_ABI_VEN34:   g_caps.fanCount += (uint8_t)(((val&0xFF)!=0)+((val>>8)!=0)); break;  // +fan3/4
     case REG_VVEN1_LO:    g_caps.fanLevels = (uint8_t)(((val&0xFF)!=0)+((val>>8)!=0)); break;   // v_ven1 v0..v1
@@ -247,41 +248,52 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_VVEN1_HI:    g_caps.fanLevels += (uint8_t)(((val&0xFF)!=0)+((val>>8)!=0));         // v4..v5
                           if(g_caps.fanLevels>5) g_caps.fanLevels=5;
                           if(g_caps.fanLevels<1) g_caps.fanLevels=1; break;
-    case REG_ROOM:    { float c=val/10.0f; if(g_oven.roomC!=c)    {g_oven.roomC=c;     bumpSeq();} } break;
-    case REG_BOILER_T:{ float c=val/10.0f; if(g_oven.boilerC!=c)  {g_oven.boilerC=c;   bumpSeq();} } break;
-    case REG_PUFFER_T:{ float c=val/10.0f; if(g_oven.pufferC!=c)  {g_oven.pufferC=c;   bumpSeq();} } break;
-    case REG_HYST_AMB_NEG:{ float c=val/10.0f; if(g_oven.hystAmbNeg!=c){g_oven.hystAmbNeg=c;bumpSeq();} } break;
-    case REG_HYST_AMB_POS:{ float c=val/10.0f; if(g_oven.hystAmbPos!=c){g_oven.hystAmbPos=c;bumpSeq();} } break;
-    case REG_HYST_SS_NEG: { float c=val/10.0f; if(g_oven.hystSSNeg !=c){g_oven.hystSSNeg =c;bumpSeq();} } break;
-    case REG_HYST_SS_POS: { float c=val/10.0f; if(g_oven.hystSSPos !=c){g_oven.hystSSPos =c;bumpSeq();} } break;
-    case REG_PUMP_MIN_ON: { float c=val/10.0f; if(g_oven.pumpMinOn !=c){g_oven.pumpMinOn =c;bumpSeq();} } break;
-    case REG_BOARD:   { float c=val/10.0f; if(g_oven.boardC!=c)   {g_oven.boardC=c;    bumpSeq();} } break;
-    case REG_FUMES:   { float c=val/10.0f; if(g_oven.fumesC!=c)   {g_oven.fumesC=c;    bumpSeq();} } break;
-    case REG_SETPOINT:{ float c=val/10.0f; if(g_oven.setpointC!=c){g_oven.setpointC=c; bumpSeq();} } break;
+    case REG_ROOM:    { float c=(int16_t)val/10.0f; if(g_oven.roomC!=c)    {g_oven.roomC=c;     bumpSeq();} } break;
+    case REG_BOILER_T:{ float c=(int16_t)val/10.0f; if(g_oven.boilerC!=c)  {g_oven.boilerC=c;   bumpSeq();} } break;
+    case REG_PUFFER_T:{ float c=(int16_t)val/10.0f; if(g_oven.pufferC!=c)  {g_oven.pufferC=c;   bumpSeq();} } break;
+    case REG_HYST_AMB_NEG:{ float c=(int16_t)val/10.0f; if(g_oven.hystAmbNeg!=c){g_oven.hystAmbNeg=c;bumpSeq();} } break;
+    case REG_HYST_AMB_POS:{ float c=(int16_t)val/10.0f; if(g_oven.hystAmbPos!=c){g_oven.hystAmbPos=c;bumpSeq();} } break;
+    case REG_HYST_SS_NEG: { float c=(int16_t)val/10.0f; if(g_oven.hystSSNeg !=c){g_oven.hystSSNeg =c;bumpSeq();} } break;
+    case REG_HYST_SS_POS: { float c=(int16_t)val/10.0f; if(g_oven.hystSSPos !=c){g_oven.hystSSPos =c;bumpSeq();} } break;
+    case REG_PUMP_MIN_ON: { float c=(int16_t)val/10.0f; if(g_oven.pumpMinOn !=c){g_oven.pumpMinOn =c;bumpSeq();} } break;
+    case REG_BOARD:   { float c=(int16_t)val/10.0f; if(g_oven.boardC!=c)   {g_oven.boardC=c;    bumpSeq();} } break;
+    case REG_FUMES:   { float c=(int16_t)val/10.0f; if(g_oven.fumesC!=c)   {g_oven.fumesC=c;    bumpSeq();} } break;
+    case REG_SETPOINT:{ float c=(int16_t)val/10.0f; if(g_oven.setpointC!=c){g_oven.setpointC=c; bumpSeq();} } break;
     case REG_POWER:    if(val>=1 && val<=5 && g_oven.power !=(int8_t)val){ g_oven.power =(int8_t)val; bumpSeq(); } break;   // hors 1..5 : ignore (voir PATCHES §11)
     case REG_MODE:                                                   // setting + live mirror
     case REG_MODE_LIVE:if(g_oven.mode  !=(int8_t)val){ g_oven.mode  =(int8_t)val; bumpSeq(); } break;
     case REG_STATE:    if(g_oven.state !=(int32_t)val){
         // ALWAYS log fine-phase changes (even with 'log off') + context.
         const char* sn = stateName((int)val);
-        Serial.printf("[PHASE] t=%lus  0x%04X -> 0x%04X (%s)  Fumes=%.1fC  Fan=%ld rpm\n",
+        Serial.printf("[PHASE] t=%lus  0x%04X -> 0x%04X (%s)  Fumes=%.1fC  FumesFan=%ld\n",
                       (unsigned long)(millis()/1000), (unsigned)(g_oven.state<0?0:g_oven.state),
                       (unsigned)val, sn[0]?sn:"unknown",
-                      isnan(g_oven.fumesC)?0.0f:g_oven.fumesC, (long)g_oven.fanComb);
+                      isnan(g_oven.fumesC)?0.0f:g_oven.fumesC, (long)g_oven.fumesFanReal);
         g_oven.state =(int32_t)val; bumpSeq(); } break;
     case REG_PHASE:    if(g_oven.phase !=(int8_t)val){ g_oven.phase =(int8_t)val; bumpSeq(); } break;
     case REG_ALARM:  { int code=val&0xFF;                               // live tipo_allarme (low byte)
         if(code!=0 && code!=g_alarmLivePrev) g_alarmDirty=true;         // new alarm -> refresh history
         g_alarmLivePrev=code;
+        int pw=val>>8;                                                  // potenza_att (high byte), hors 0..5 : ignore
+        if(pw<=5 && g_oven.powerNow!=pw){ g_oven.powerNow=(int8_t)pw; bumpSeq(); }
         if(g_oven.alarm!=code){ g_oven.alarm=(int16_t)code; bumpSeq(); } } break;
     case REG_ALARM_IDX: g_alarmIndex=(val>>8); g_alarmNum=(val&0xFF); break;  // head / count
-    case REG_FLAGS:    if(g_oven.flags !=(int16_t)val){g_oven.flags =(int16_t)val;bumpSeq(); } break;
+    case REG_FLAGS:    if(!g_oven.flagsOk || g_oven.flags!=val){g_oven.flags=val;g_oven.flagsOk=true;bumpSeq(); } break;
     case REG_IGNIT:  { static CounterGuard ig;
                        if(counterPlausible(ig, "ignitions", g_oven.ignitions, (int32_t)val, 20, 200000)
                           && g_oven.ignitions!=(int32_t)val){g_oven.ignitions=(int32_t)val;bumpSeq();} } break;
-    case REG_ACTIVE:   if(g_oven.active !=(int32_t)val){g_oven.active =(int32_t)val;bumpSeq();} break;
-    case REG_FAN_COMB: if(g_oven.fanComb!=(int32_t)val){g_oven.fanComb=(int32_t)val;bumpSeq();} break;
-    case REG_FAN_ROOM: if(g_oven.fanRoom!=(int32_t)val){g_oven.fanRoom=(int32_t)val;bumpSeq();} break;
+    case REG_PRESSURE_PA: { float c=(int16_t)val/10.0f; if(g_oven.pressurePa!=c || isnan(g_oven.pressurePa)){g_oven.pressurePa=c;bumpSeq();} } break;
+    case REG_PRESSURE:    { float c=(int16_t)val/10.0f; if(g_oven.pressure  !=c || isnan(g_oven.pressure))  {g_oven.pressure  =c;bumpSeq();} } break;
+    // Vitesses (uint16) : 0xFFFF = valeur invalide, ignore.
+    case REG_AUGER_SET:     if(val!=SENTINEL16 && g_oven.augerSet   !=(int32_t)val){g_oven.augerSet   =(int32_t)val;bumpSeq();} break;
+    case REG_AUGER_REAL:    if(val!=SENTINEL16 && g_oven.augerReal  !=(int32_t)val){g_oven.augerReal  =(int32_t)val;bumpSeq();} break;
+    case REG_FUMES_FAN_SET: if(val!=SENTINEL16 && g_oven.fumesFanSet !=(int32_t)val){g_oven.fumesFanSet =(int32_t)val;bumpSeq();} break;
+    case REG_FUMES_FAN_REAL:if(val!=SENTINEL16 && g_oven.fumesFanReal!=(int32_t)val){g_oven.fumesFanReal=(int32_t)val;bumpSeq();} break;
+    case REG_SERVICE_LO: serviceLo = val; break;                       // mot bas ; combine a la reception du mot haut
+    case REG_SERVICE_HI: { uint32_t h=((uint32_t)val<<16)|serviceLo;
+        if(h<=100000UL && g_oven.serviceH!=(int32_t)h){ g_oven.serviceH=(int32_t)h; bumpSeq(); }   // > 100000 h : trame corrompue, rejete
+      } break;
+    case REG_RESET_CAUSE: if(val!=SENTINEL16 && g_oven.resetCause!=(int32_t)val){ g_oven.resetCause=(int32_t)val; bumpSeq(); } break;
     case REG_FAN_LIVE: if(g_oven.fanLevel!=(int8_t)val){g_oven.fanLevel=(int8_t)val;bumpSeq();} break;
     case REG_FAN2_SET: if(g_oven.fan2Set!=(int8_t)val){g_oven.fan2Set=(int8_t)val;bumpSeq();} break;
     case REG_FAN3_SET: if(g_oven.fan3Set!=(int8_t)val){g_oven.fan3Set=(int8_t)val;bumpSeq();} break;
@@ -433,11 +445,17 @@ static void printStatus(){
   if (g_oven.fanLevel>=0)       Serial.printf("  Fan level        = %d\n", g_oven.fanLevel);
   if (g_oven.fan2Set>=0)        Serial.printf("  Fan 2 (ducted)   = %s\n", g_oven.fan2Set==6?"Auto":String((int)g_oven.fan2Set).c_str());
   if (g_oven.fan3Set>=0)        Serial.printf("  Fan 3 (ducted)   = %s\n", g_oven.fan3Set==6?"Auto":String((int)g_oven.fan3Set).c_str());
-  if (g_oven.fanRoom>=0)        Serial.printf("  Fumes fan        = %ld rpm\n", (long)g_oven.fanRoom);
-  if (g_oven.fanComb>=0)        Serial.printf("  Combustion fan   = %ld rpm\n", (long)g_oven.fanComb);
-  if (g_oven.active>=0)         Serial.printf("  Active           = %ld\n", (long)g_oven.active);
-  if (g_oven.flags>=0)          Serial.printf("  Flags 0x0332     = 0x%02X (Chrono=%d Silent=%d)\n",
-                                              g_oven.flags, (g_oven.flags>>6)&1, (g_oven.flags>>5)&1);
+  if (g_oven.fumesFanSet>=0)    Serial.printf("  Fumes fan set    = %ld\n", (long)g_oven.fumesFanSet);
+  if (g_oven.fumesFanReal>=0)   Serial.printf("  Fumes fan real   = %ld\n", (long)g_oven.fumesFanReal);
+  if (g_oven.augerSet>=0)       Serial.printf("  Auger set        = %ld\n", (long)g_oven.augerSet);
+  if (g_oven.augerReal>=0)      Serial.printf("  Auger real       = %ld\n", (long)g_oven.augerReal);
+  if (!isnan(g_oven.pressurePa)) Serial.printf("  Air pressure     = %.1f Pa\n", g_oven.pressurePa);
+  if (!isnan(g_oven.pressure))  Serial.printf("  Air pressure raw = %.1f (0x02C9, unit unknown)\n", g_oven.pressure);
+  if (g_oven.powerNow>=0)       Serial.printf("  Power (actual)   = %d\n", g_oven.powerNow);
+  if (g_oven.serviceH>=0)       Serial.printf("  Hours to service = %ld\n", (long)g_oven.serviceH);
+  if (g_oven.resetCause>=0)     Serial.printf("  Reset cause      = %ld\n", (long)g_oven.resetCause);
+  if (g_oven.flagsOk)           Serial.printf("  Flags 0x0332     = 0x%04X (Chrono=%d Silent=%d)\n",
+                                              (unsigned)g_oven.flags, (g_oven.flags>>6)&1, (g_oven.flags>>5)&1);
   if (g_oven.alarm>=0){ Serial.print("  Active alarm     = ");
     if(g_oven.alarm>0) Serial.printf("A%d  ('ack' to acknowledge)\n", g_oven.alarm); else Serial.println("none"); }
   if (g_oven.alarmHist[0]>=0){  Serial.print("  Last alarm       = ");
@@ -488,7 +506,7 @@ static void notifyCB(NimBLERemoteCharacteristic*, uint8_t *data, size_t len, boo
       ovenApplyReg(STATUS_BASE + (uint16_t)(i/2), (g_status[i]<<8)|g_status[i+1]);
     int rt=regVal(0x02BC), ph=regVal(0x0322);
     Serial.printf("[##] Status ctr=%08X regs=%u Room=%.1fC Phase=%s ('status' for details)\n",
-                  g_statusCtr, (unsigned)(g_statusLen/2), rt/10.0, ph==3?"Running":ph==1?"Off":"?");
+                  g_statusCtr, (unsigned)(g_statusLen/2), (rt<0?0.0:(int16_t)rt/10.0), ph==3?"Running":ph==1?"Off":"?");
     return;
   }
   if (len%16 || len<32) {

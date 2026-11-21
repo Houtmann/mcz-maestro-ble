@@ -36,9 +36,9 @@ static uint32_t g_lastRejMs = 0; static bool g_haveRej = false;
 static bool outOfRange(uint16_t reg, uint16_t raw){
   switch (reg){
     case REG_HYST_AMB_NEG: case REG_HYST_AMB_POS: case REG_HYST_SS_NEG: case REG_HYST_SS_POS:
-      return raw/10.0f > 20.0f;                       // plage HYDRO_NUMS 0..20 (raw non signe -> jamais < 0)
-    case REG_PUMP_MIN_ON:  return raw/10.0f < 20.0f || raw/10.0f > 90.0f;
-    case REG_SET_PUFFER:   return raw != SENTINEL16 && (raw/10.0f < 30.0f || raw/10.0f > 85.0f);
+      return (int16_t)raw/10.0f < 0.0f || (int16_t)raw/10.0f > 20.0f;   // plage HYDRO_NUMS 0..20 (type 3 signe, comme le decodage)
+    case REG_PUMP_MIN_ON:  return (int16_t)raw/10.0f < 20.0f || (int16_t)raw/10.0f > 90.0f;
+    case REG_SET_PUFFER:   return raw != SENTINEL16 && ((int16_t)raw/10.0f < 30.0f || (int16_t)raw/10.0f > 85.0f);
     case REG_POWER:        return raw < 1 || raw > 5;
     case REG_FAN_LIVE: case REG_FAN2_SET: case REG_FAN3_SET: return raw > 6;   // 0 = legitime (Auto/arret)
   }
