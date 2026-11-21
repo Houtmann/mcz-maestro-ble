@@ -31,6 +31,12 @@ https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display
 platformio run -e <target> --target upload --upload-port "$PORT"
 ```
 
+## Docker build tools
+
+`tools/docker/` builds with PlatformIO inside Docker (nothing to install on the host):
+`tools/docker/build.sh <env>` (esp32dev, esp32dev_diag, cyd); toolchains are cached in the
+Docker volume `pio-cache`. No upload/flash.
+
 ## Over-the-air update (HTTP)
 
 The ESP serves `POST /update` (multipart, field `firmware`, Basic Auth `admin` / `OTA_PASSWORD`
@@ -38,11 +44,11 @@ from `src/config.h`; absent or empty = OTA disabled). From the Mac, with nothing
 besides Docker:
 
 ```bash
-../outils/platformio/ota.sh <ip> [env]    # builds in Docker, then curl; password from $OTA_PASSWORD or prompt
+tools/docker/ota.sh <ip> [env]    # builds in Docker, then curl; password from $OTA_PASSWORD or prompt
 ```
 
 The first flash has to be over USB (browser, esptool-js); OTA also needs a partition table with
-two OTA slots (not `huge_app.csv`). Files, offsets and caveats: see `PATCHES.md` section 14.
+two OTA slots: `esp32dev` / `esp32dev_diag` use `default.csv`, `cyd` keeps `huge_app.csv` and has no OTA. Files, offsets and caveats: see `PATCHES.md` section 14.
 
 ## Extra entities
 

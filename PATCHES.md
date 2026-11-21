@@ -339,7 +339,7 @@ du core Arduino).
   battement de 30 s si l'envoi échoue). Authentification vérifiée dès le premier bloc, avant
   `Update.begin`. Binaire invalide/tronqué (`Update.end` ou `Update.hasError`) → HTTP 500 avec
   la cause, ancien firmware conservé ; redémarrage seulement en cas de succès.
-- **Outils** (`outils/platformio/`, tout dans Docker, rien d'installé sur le Mac) : `Dockerfile`
+- **Outils** (`tools/docker/`, tout dans Docker, rien d'installé sur le Mac) : `Dockerfile`
   (python:3.12-slim + `platformio==6.1.16`), `build.sh <env>` (volume `pio-cache` pour les
   toolchains), `ota.sh <ip> [env]` (build puis `curl -u admin:...` ; mot de passe via
   `$OTA_PASSWORD` ou saisie masquée, transmis à curl par stdin, jamais écrit ni affiché).
