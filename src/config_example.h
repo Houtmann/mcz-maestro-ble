@@ -60,3 +60,9 @@
 #define FALLBACK_AP_SSID      "MCZ-Bridge"
 #define FALLBACK_AP_PASS      "mczbridge"      // 8 caracteres minimum (WPA2)
 #define FALLBACK_AP_DELAY_S   60
+
+// ---- Mise a jour OTA par HTTP (PATCHES.md §14) ------------------------------
+// POST http://<ip>/update (multipart, champ `firmware`), Basic Auth, utilisateur `admin`.
+// Mot de passe ci-dessous ; absent ou "" = OTA desactivee. Valeur bidon : a changer.
+// Necessite une table de partitions avec deux slots OTA (pas huge_app.csv).
+#define OTA_PASSWORD   "change-me"

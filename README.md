@@ -31,6 +31,19 @@ https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display
 platformio run -e <target> --target upload --upload-port "$PORT"
 ```
 
+## Over-the-air update (HTTP)
+
+The ESP serves `POST /update` (multipart, field `firmware`, Basic Auth `admin` / `OTA_PASSWORD`
+from `src/config.h`; absent or empty = OTA disabled). From the Mac, with nothing installed
+besides Docker:
+
+```bash
+../outils/platformio/ota.sh <ip> [env]    # builds in Docker, then curl; password from $OTA_PASSWORD or prompt
+```
+
+The first flash has to be over USB (browser, esptool-js); OTA also needs a partition table with
+two OTA slots (not `huge_app.csv`). Files, offsets and caveats: see `PATCHES.md` section 14.
+
 ## Disabling the Cloud Connection
 
 With this solution in place, you can disable the oven's Wi-Fi connection entirely. If you prefer to block the connection at your router instead, note that the oven tries to reach the hostname *m.maestro.mcz.it*.

@@ -319,3 +319,49 @@ lecture dédiée), à décider.
 fumées (« rpm » conservé sur les fumées seulement, par continuité) ; `ore_service` est-il
 bien un décompte en heures ; valeurs de `dia_res_cau` ; que `potenza_att` suit bien la
 puissance réelle ; si 0x0372 vaut 0 sur ce poêle AIR.
+
+## 14. Mise à jour OTA par HTTP
+
+L'ESP est serveur (pas d'`espota` : le retour TCP ne passe pas depuis un conteneur Docker sur
+Mac). `net_mqtt.cpp` : `POST /update` (multipart, champ `firmware`), Basic Auth utilisateur
+`admin`, mot de passe `OTA_PASSWORD` de `config.h`. Aucune lib ajoutée (`WebServer` + `Update`
+du core Arduino).
+
+- **Un seul serveur web** : le `WebServer` du point d'accès de secours (§7, port 80) est
+  réutilisé. L'OTA démarre quand le WiFi STA est connecté ; si l'AP de secours s'ouvre, puis
+  se referme au retour du WiFi, `g_otaUp` est remis à faux (le `stop()` ferme le serveur) et
+  l'OTA redémarre. Le serveur est aussi compilé si `FALLBACK_AP=0` mais `OTA_PASSWORD` défini.
+- **Désactivation** : `OTA_PASSWORD` absent (code non compilé) ou `""` (compilé, inerte) →
+  log série `>> OTA desactivee (...)` au démarrage. `config_example.h` donne une valeur bidon
+  (`change-me`) ; `setup-secrets.sh` demande aussi ce mot de passe (vide = inchangé).
+- **Pendant l'envoi** : l'écriture est synchrone dans `handleClient()`, donc `loop()` (polling
+  BLE compris) est suspendu ; la disponibilité MQTT passe à `offline` au début (rétablie par le
+  battement de 30 s si l'envoi échoue). Authentification vérifiée dès le premier bloc, avant
+  `Update.begin`. Binaire invalide/tronqué (`Update.end` ou `Update.hasError`) → HTTP 500 avec
+  la cause, ancien firmware conservé ; redémarrage seulement en cas de succès.
+- **Outils** (`outils/platformio/`, tout dans Docker, rien d'installé sur le Mac) : `Dockerfile`
+  (python:3.12-slim + `platformio==6.1.16`), `build.sh <env>` (volume `pio-cache` pour les
+  toolchains), `ota.sh <ip> [env]` (build puis `curl -u admin:...` ; mot de passe via
+  `$OTA_PASSWORD` ou saisie masquée, transmis à curl par stdin, jamais écrit ni affiché).
+
+**Partitions : bloquant en l'état.** `platformio.ini` fixe `board_build.partitions = huge_app.csv`
+(un seul slot `app0` de 3 Mo, **pas d'OTA**) : `Update.begin` échoue, l'envoi est rejeté (500).
+Il faut une table à deux slots, par ex. `default.csv` (app0/app1 de 1,25 Mo ; le firmware
+`esp32dev` fait 1,10 Mo, `cyd` 1,4 Mo ne rentre pas). Ce changement n'est **pas** fait ici : il
+impose un flash USB complet. Il se fait à la main : `board_build.partitions = default.csv`
+dans `[env:esp32dev]` (ou `[env]`).
+
+**Premier flash USB** (navigateur, esptool-js), fichiers produits par `build.sh esp32dev` dans
+`mcz-maestro-ble/.pio/build/esp32dev/`, mêmes offsets quelle que soit la table :
+
+| Offset | Fichier |
+|---|---|
+| 0x1000 | `bootloader.bin` |
+| 0x8000 | `partitions.bin` |
+| 0xE000 | `boot_app0.bin` (framework : `packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin` dans le volume Docker `pio-cache`) |
+| 0x10000 | `firmware.bin` |
+
+`partitions.bin` doit venir d'un build fait **avec** la table à deux slots. Pour extraire
+`boot_app0.bin` : `docker run --rm -v pio-cache:/c -v "$PWD":/out python:3.12-slim cp /c/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin /out/`.
+Ensuite, mises à jour par `ota.sh`. Vérifié : compilation `esp32dev` (OTA désactivée) et
+`esp32dev_diag` avec `-DOTA_PASSWORD=\"x\"` (OTA compilée) ; **non testé sur le matériel**.

@@ -13,14 +13,32 @@
 #include "appconfig.h"
 #include "oven.h"
 #include "diag.h"
-#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+// OTA HTTP (PATCHES §14) : compilee si OTA_PASSWORD est defini dans config.h, active si non vide.
+// Le serveur web est le meme que celui du point d'acces de secours (un seul WebServer, port 80).
+#if defined(OTA_PASSWORD)
+#define OTA_COMPILED 1
+#endif
+#if (defined(FALLBACK_AP) && (FALLBACK_AP == 1)) || defined(OTA_COMPILED)
 #include <WebServer.h>   // apres config.h : la macro doit etre connue
+#define HAVE_WEBSRV 1
+#endif
+#ifdef OTA_COMPILED
+#include <Update.h>
+static const bool OTA_ON = sizeof(OTA_PASSWORD) > 1;   // chaine vide -> desactivee
 #endif
 
-#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+#ifdef HAVE_WEBSRV
 static WebServer  g_diagSrv(80);
+#endif
+#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
 static bool       g_apUp = false;
 static String     g_scanCache;
+#endif
+#ifdef OTA_COMPILED
+static bool       g_otaUp = false;          // serveur demarre sur l'interface STA
+static bool       g_otaAuthed = false;      // le televersement en cours est authentifie
+static bool       g_otaFailed = false;
+static String     g_otaErr;
 #endif
 static WiFiClient   wifiClient;
 static PubSubClient mqtt(wifiClient);
@@ -412,6 +430,11 @@ static void publishState(){
 static void publishAvail(bool online){
   mqtt.publish(T_AVAIL.c_str(), online ? "online" : "offline", true);
 }
+#ifdef OTA_COMPILED
+static void publishAvailOffline(){      // avant un televersement OTA : HA voit le pont hors ligne
+  if (mqtt.connected()){ publishAvail(false); mqtt.loop(); }
+}
+#endif
 
 // ---- Command callback -----------------------------------------------------
 static int parseMode(const String& s){
@@ -477,8 +500,57 @@ static bool mqttConnect(){
   return true;
 }
 
+#ifdef OTA_COMPILED
+// POST /update (multipart, champ `firmware`), Basic Auth admin / OTA_PASSWORD.
+// L'ecriture est synchrone dans handleClient() : la boucle (donc le polling BLE) est suspendue
+// pendant le televersement. Reboot seulement si Update.end() reussit ; un binaire invalide
+// ou tronque est rejete (Update.hasError) et l'ancien firmware reste en place.
+static void otaUpload(){
+  HTTPUpload& up = g_diagSrv.upload();
+  if (up.status == UPLOAD_FILE_START){
+    g_otaAuthed = g_diagSrv.authenticate("admin", OTA_PASSWORD);
+    g_otaFailed = false; g_otaErr = "";
+    if (!g_otaAuthed) return;
+    Serial.printf(">> OTA: reception de '%s'\n", up.filename.c_str());
+    publishAvailOffline();
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)){ g_otaFailed = true; g_otaErr = Update.errorString(); }
+  } else if (!g_otaAuthed || g_otaFailed){
+    return;
+  } else if (up.status == UPLOAD_FILE_WRITE){
+    if (Update.write(up.buf, up.currentSize) != up.currentSize){ g_otaFailed = true; g_otaErr = Update.errorString(); }
+  } else if (up.status == UPLOAD_FILE_END){
+    if (!Update.end(true)){ g_otaFailed = true; g_otaErr = Update.errorString(); }
+    else Serial.printf(">> OTA: %u octets recus, image valide\n", (unsigned)up.totalSize);
+  } else if (up.status == UPLOAD_FILE_ABORTED){
+    Update.abort(); g_otaFailed = true; g_otaErr = "televersement interrompu";
+  }
+}
+static void otaDone(){
+  if (!g_otaAuthed){ g_diagSrv.requestAuthentication(); return; }
+  if (g_otaFailed || Update.hasError()){
+    Serial.printf("!! OTA rejetee : %s (ancien firmware conserve)\n", g_otaErr.c_str());
+    g_diagSrv.send(500, "text/plain", String("FAIL: ") + g_otaErr + "\n");
+    return;
+  }
+  g_diagSrv.send(200, "text/plain", "OK, redemarrage\n");
+  Serial.println(">> OTA reussie : redemarrage");
+  delay(500); ESP.restart();
+}
+static void otaStart(){                 // appele quand le WiFi STA est connecte
+  g_diagSrv.on("/update", HTTP_POST, otaDone, otaUpload);
+  g_diagSrv.begin(); g_otaUp = true;
+  Serial.printf(">> OTA: POST http://%s/update (champ 'firmware', utilisateur admin)\n",
+                WiFi.localIP().toString().c_str());
+}
+#endif
+
 // ---- API ------------------------------------------------------------------
 void netBegin(){
+#ifdef OTA_COMPILED
+  if (!OTA_ON) Serial.println(">> OTA desactivee (OTA_PASSWORD vide dans config.h)");
+#else
+  Serial.println(">> OTA desactivee (OTA_PASSWORD absent de config.h)");
+#endif
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(true);                // BLE+WiFi coexistence: modem sleep MUST be on
                                       // VERIFIE : setSleep(false) fait paniquer la puce (reboot en boucle)
@@ -544,6 +616,15 @@ void netTick(){
   if (g_apUp){                       // WiFi revenu : refermer l'AP de secours
     g_diagSrv.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA);
     g_apUp = false; Serial.println(">> WiFi retabli : point d'acces de secours ferme");
+#ifdef OTA_COMPILED
+    g_otaUp = false;                 // stop() a ferme le serveur : OTA redemarree ci-dessous
+#endif
+  }
+#endif
+#ifdef OTA_COMPILED
+  if (OTA_ON){
+    if (!g_otaUp) otaStart();
+    g_diagSrv.handleClient();
   }
 #endif
   if (!g_idReady){                    // wait for identity (oven MAC)
