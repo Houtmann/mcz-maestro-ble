@@ -30,6 +30,14 @@ static const bool OTA_ON = sizeof(OTA_PASSWORD) > 1;   // chaine vide -> desacti
 #ifdef HAVE_WEBSRV
 static WebServer  g_diagSrv(80);
 #endif
+// Etat de la liaison WiFi (PATCHES §16) : association, watchdog, compteurs exposes en MQTT.
+static uint32_t   g_wifiAttemptMs  = 0;      // debut de la tentative d'association en cours
+static uint32_t   g_wifiDownSince  = 0;      // debut de la coupure (0 = depuis le demarrage)
+static uint32_t   g_wifiReconnects = 0;      // associations apres la premiere
+static bool       g_wifiWasUp = false, g_wifiEverUp = false;
+static const uint32_t WIFI_BLE_HOLD_MS = 30000;    // BLE muet pendant les 30 premieres s d'une association
+static const uint32_t WIFI_FULL_RESTART_MS = 60000;   // sans connexion : disconnect(true)+begin complet
+static const uint32_t WIFI_REBOOT_MS = 600000;        // sans connexion depuis 10 min : ESP.restart()
 #if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
 static bool       g_apUp = false;
 static String     g_scanCache;
@@ -134,6 +142,14 @@ static void publishJson(const String& topic, JsonDocument& doc, bool retain){
 }
 static String discoTopic(const char* component, const char* objectId){
   return String(HA_DISCOVERY_PREFIX) + "/" + component + "/" + g_id + "_" + objectId + "/config";
+}
+static const char* otaState(){          // "on" = serveur a l'ecoute, "off" = active mais WiFi absent, "disabled"
+#ifdef OTA_COMPILED
+  if (!OTA_ON) return "disabled";
+  return g_otaUp ? "on" : "off";
+#else
+  return "disabled";
+#endif
 }
 // Indice FR indicatif par code d'alarme (PATCHES §15) ; nullptr = pas d'attribut. A03 : delai seulement.
 static const char* alarmHint(int code){
@@ -316,6 +332,11 @@ static void publishDiscovery(){
     snprintf(tpl,  sizeof(tpl),  "{{ value_json.pt%d_h }}", i);
     addSensor(oid, name, tpl, "h", "duration", "total_increasing");
   }
+  // Etat du pont (PATCHES §16) : IP, OTA, uptime, reconnexions WiFi.
+  addSensor("bridge_ip", "Bridge IP", optTpl("ip").c_str(), "", "", "", "diagnostic");
+  addSensor("ota_state", "OTA", optTpl("ota").c_str(), "", "", "", "diagnostic");
+  addSensor("bridge_uptime", "Bridge uptime", optTpl("uptime_s").c_str(), "s", "duration", "measurement", "diagnostic");
+  addSensor("wifi_reconnects", "WiFi reconnections", optTpl("wifi_reconnects").c_str(), "", "", "total_increasing", "diagnostic");
   // Capteurs ajoutes d'apres la table M2 (PATCHES §15). Valeurs hors plage / sentinelles non publiees.
   addSensor("outdoor_temp", "Outdoor temperature", optTpl("outdoor_temp").c_str(), "°C", "temperature", "measurement");
   addSensor("panel_temp", "Panel temperature", optTpl("panel_temp").c_str(), "°C", "temperature", "measurement", "diagnostic");
@@ -444,6 +465,8 @@ static void publishState(){
     char k[8]; snprintf(k,sizeof(k),"pt%d_h",i+1); d[k] = serialized(String(g_oven.powerTimeMin[i]/60.0, 2));
   }
   d["ble"] = g_oven.bleOnline;
+  d["uptime_s"] = (uint32_t)(millis()/1000); d["ota"] = otaState(); d["wifi_reconnects"] = g_wifiReconnects;
+  if (WiFi.status() == WL_CONNECTED){ d["ip"] = WiFi.localIP().toString(); }
   if (WiFi.status() == WL_CONNECTED) d["rssi"] = WiFi.RSSI();   // rafraichi par le heartbeat (HEARTBEAT_MS)
   d["seq"] = g_oven.seq;
   if (g_ovenSerial.length()) d["serial"] = g_ovenSerial;
@@ -558,7 +581,33 @@ static bool mqttConnect(){
   return true;
 }
 
+#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+static String diagPage(){
+  String p = "MCZ BLE bridge - diagnostic\n\n";
+  p += "uptime      : " + String(millis()/1000) + " s\n";
+  p += "WiFi status : " + String((int)WiFi.status()) + "  (3 = connecte)\n";
+  p += "SSID cible  : " + g_cfg.wifiSsid + "\n";
+  p += "MAC         : " + WiFi.macAddress() + "\n";
+  p += "IP STA      : " + WiFi.localIP().toString() + "\n";
+  p += "RSSI        : " + String((int)WiFi.RSSI()) + " dBm\n";
+  p += "MQTT        : " + g_cfg.mqttHost + ":" + String(g_cfg.mqttPort)
+     + "  " + (mqtt.connected() ? "connecte" : "NON connecte") + "\n";
+  p += "BLE poele   : " + String(g_oven.bleOnline ? "en ligne" : "hors ligne") + "\n";
+  p += "Ambiante    : " + String(g_oven.roomC, 1) + " C\n\n";
+  p += "Reseaux vus au demarrage de ce point d'acces :\n" + g_scanCache;
+  return p;
+}
+#endif
 #ifdef OTA_COMPILED
+// GET / : test de joignabilite sans authentification (HTTP 200 + build + etat).
+static void otaRoot(){
+#if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
+  if (WiFi.status() != WL_CONNECTED){ g_diagSrv.send(200, "text/plain; charset=utf-8", diagPage()); return; }
+#endif
+  String p = "MCZ bridge OK\nbuild " __DATE__ " " __TIME__ "\n";
+  p += "ip " + WiFi.localIP().toString() + "\nuptime " + String(millis()/1000) + " s\nota " + otaState() + "\n";
+  g_diagSrv.send(200, "text/plain; charset=utf-8", p);
+}
 // POST /update (multipart, champ `firmware`), Basic Auth admin / OTA_PASSWORD.
 // L'ecriture est synchrone dans handleClient() : la boucle (donc le polling BLE) est suspendue
 // pendant le televersement. Reboot seulement si Update.end() reussit ; un binaire invalide
@@ -595,12 +644,37 @@ static void otaDone(){
   delay(500); ESP.restart();
 }
 static void otaStart(){                 // appele quand le WiFi STA est connecte
-  g_diagSrv.on("/update", HTTP_POST, otaDone, otaUpload);
-  g_diagSrv.begin(); g_otaUp = true;
-  Serial.printf(">> OTA: POST http://%s/update (champ 'firmware', utilisateur admin)\n",
+  static bool handlers = false;         // on() ajoute un handler a chaque appel : une seule fois
+  if (!handlers){
+    g_diagSrv.on("/", HTTP_GET, otaRoot);
+    g_diagSrv.on("/update", HTTP_POST, otaDone, otaUpload);
+    handlers = true;
+  }
+  g_diagSrv.stop(); g_diagSrv.begin(); g_otaUp = true;   // (re)lie le port 80 a chaque (re)connexion STA
+  Serial.printf(">> OTA: http://%s/update (POST, champ 'firmware', utilisateur admin ; GET / = test)\n",
                 WiFi.localIP().toString().c_str());
 }
 #endif
+
+// Association complete (utilisee au demarrage et par le watchdog). Modem sleep OBLIGATOIRE avec le BLE.
+static void wifiBegin(){
+#if defined(USE_STATIC_IP) && (USE_STATIC_IP == 1)
+  { IPAddress ip, gw, mask, dns;      // IP fixe -> pas de DHCP, association immediate
+    if (ip.fromString(STATIC_IP) && gw.fromString(STATIC_GW) &&
+        mask.fromString(STATIC_MASK) && dns.fromString(STATIC_DNS)) {
+      if (!WiFi.config(ip, gw, mask, dns)) Serial.println("!! WiFi.config (IP statique) a echoue");
+      else Serial.printf(">> IP statique %s (gw %s)\n", STATIC_IP, STATIC_GW);
+    } else Serial.println("!! IP statique: adresse invalide dans config.h");
+  }
+#endif
+  WiFi.begin(g_cfg.wifiSsid.c_str(), g_cfg.wifiPass.c_str());
+  WiFi.setSleep(true);                // VERIFIE : setSleep(false) fait paniquer la puce (reboot en boucle)
+  g_wifiAttemptMs = millis();
+}
+bool netBleHold(){                    // WiFi prioritaire : BLE muet pendant l'association
+  if (WiFi.status() == WL_CONNECTED) return false;
+  return millis() - g_wifiAttemptMs < WIFI_BLE_HOLD_MS;
+}
 
 // ---- API ------------------------------------------------------------------
 void netBegin(){
@@ -612,16 +686,7 @@ void netBegin(){
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(true);                // BLE+WiFi coexistence: modem sleep MUST be on
                                       // VERIFIE : setSleep(false) fait paniquer la puce (reboot en boucle)
-#if defined(USE_STATIC_IP) && (USE_STATIC_IP == 1)
-  { IPAddress ip, gw, mask, dns;      // IP fixe -> pas de DHCP, association immediate
-    if (ip.fromString(STATIC_IP) && gw.fromString(STATIC_GW) &&
-        mask.fromString(STATIC_MASK) && dns.fromString(STATIC_DNS)) {
-      if (!WiFi.config(ip, gw, mask, dns)) Serial.println("!! WiFi.config (IP statique) a echoue");
-      else Serial.printf(">> IP statique %s (gw %s)\n", STATIC_IP, STATIC_GW);
-    } else Serial.println("!! IP statique: adresse invalide dans config.h");
-  }
-#endif
-  WiFi.begin(g_cfg.wifiSsid.c_str(), g_cfg.wifiPass.c_str());
+  wifiBegin();
   Serial.printf(">> WiFi: connecting to '%s' ...\n", g_cfg.wifiSsid.c_str());
   mqtt.setServer(g_cfg.mqttHost.c_str(), g_cfg.mqttPort);
   mqtt.setBufferSize(2048);          // large HA discovery payloads (climate ~1 kB)
@@ -632,7 +697,20 @@ void netTick(){
   static uint32_t lastWifi=0, lastMqtt=0;
   uint32_t now = millis();
   if (WiFi.status() != WL_CONNECTED){
-    if (now - lastWifi > 20000){ lastWifi = now; WiFi.reconnect(); }  // 5s -> 20s : laisser le temps a l'association
+    if (g_wifiWasUp){                 // coupure detectee
+      g_wifiWasUp = false; g_wifiDownSince = now; g_wifiAttemptMs = now;
+      Serial.println("!! WiFi perdu");
+    }
+    if (now - g_wifiDownSince > WIFI_REBOOT_MS){
+      Serial.printf("!! WiFi absent depuis %lu s : redemarrage\n", (unsigned long)((now - g_wifiDownSince)/1000));
+      delay(200); ESP.restart();
+    }
+    if (now - g_wifiAttemptMs > WIFI_FULL_RESTART_MS){   // reconnect() n'aboutit pas : association complete
+      Serial.printf("!! WiFi non associe depuis %lu s : disconnect(true) + begin complet\n",
+                    (unsigned long)((now - g_wifiAttemptMs)/1000));
+      WiFi.disconnect(true); delay(100);
+      wifiBegin(); lastWifi = now;
+    } else if (now - lastWifi > 20000){ lastWifi = now; WiFi.reconnect(); }   // 5s -> 20s : laisser le temps a l'association
 #if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
     if (!g_apUp && now > (uint32_t)FALLBACK_AP_DELAY_S * 1000UL){
       g_scanCache = "";
@@ -646,21 +724,7 @@ void netTick(){
       WiFi.scanDelete();
       WiFi.mode(WIFI_AP_STA);
       WiFi.softAP(FALLBACK_AP_SSID, FALLBACK_AP_PASS);
-      g_diagSrv.onNotFound([](){
-        String p = "MCZ BLE bridge - diagnostic\n\n";
-        p += "uptime      : " + String(millis()/1000) + " s\n";
-        p += "WiFi status : " + String((int)WiFi.status()) + "  (3 = connecte)\n";
-        p += "SSID cible  : " + g_cfg.wifiSsid + "\n";
-        p += "MAC         : " + WiFi.macAddress() + "\n";
-        p += "IP STA      : " + WiFi.localIP().toString() + "\n";
-        p += "RSSI        : " + String((int)WiFi.RSSI()) + " dBm\n";
-        p += "MQTT        : " + g_cfg.mqttHost + ":" + String(g_cfg.mqttPort)
-           + "  " + (mqtt.connected() ? "connecte" : "NON connecte") + "\n";
-        p += "BLE poele   : " + String(g_oven.bleOnline ? "en ligne" : "hors ligne") + "\n";
-        p += "Ambiante    : " + String(g_oven.roomC, 1) + " C\n\n";
-        p += "Reseaux vus au demarrage de ce point d'acces :\n" + g_scanCache;
-        g_diagSrv.send(200, "text/plain; charset=utf-8", p);
-      });
+      g_diagSrv.onNotFound([](){ g_diagSrv.send(200, "text/plain; charset=utf-8", diagPage()); });
       g_diagSrv.begin();
       g_apUp = true;
       Serial.printf(">> WiFi indisponible : point d'acces de secours '%s' ouvert, http://192.168.4.1/\n",
@@ -669,6 +733,13 @@ void netTick(){
     if (g_apUp) g_diagSrv.handleClient();
 #endif
     return;
+  }
+  if (!g_wifiWasUp){                  // (re)association reussie
+    g_wifiWasUp = true; if (g_wifiEverUp) g_wifiReconnects++; g_wifiEverUp = true; g_wifiDownSince = now;
+    Serial.printf(">> WiFi connecte : IP %s RSSI %d dBm\n", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+#ifdef OTA_COMPILED
+    g_otaUp = false;                 // le serveur est relie a chaque (re)connexion (otaStart ci-dessous)
+#endif
   }
 #if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
   if (g_apUp){                       // WiFi revenu : refermer l'AP de secours
@@ -728,4 +799,5 @@ void netBegin(){}
 void netTick(){}
 bool netWifiUp(){ return false; }
 bool netMqttUp(){ return false; }
+bool netBleHold(){ return false; }
 #endif

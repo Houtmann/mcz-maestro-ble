@@ -409,3 +409,49 @@ disponible pour un essai manuel, à vos risques.
 `r 032A 1` (unité de l'autonomie : comparer à la consommation réelle), `r 0365 1`, `r 0368 2`,
 `r 0389 1` (905 hors blocs, lecture directe), `r 0320 1` en phase d'arrêt pour confirmer
 0x0203 et chercher le code de refroidissement, et un déclenchement d'alarme réel pour les `hint`.
+
+## 16. Wi-Fi prioritaire sur le BLE, IP et état OTA exposés
+
+**Symptôme** (journal série, poêle hors de portée BLE) : `wifi=0` pendant 7 min, `WiFi status=6`
+(déconnecté), `scanNetworks()` = 0 réseau alors que la Livebox et le réseau cible sont à côté,
+et ~8 min pour se reconnecter près du poêle ; le port 80 (`/update`) injoignable.
+
+**Cause retenue : le BLE affame le Wi-Fi** (une seule radio partagée). Preuves dans le code :
+- `main.cpp` `setup()` : `setInterval(100); setWindow(99)` = **scan continu** (fenêtre = 99 % de
+  l'intervalle) ; `startScan()` relance un scan de 8 s dès que le précédent finit : la radio
+  n'est jamais libre pour l'association ni pour le scan Wi-Fi.
+- `connectTarget()` : `NimBLEClient::connect()` utilise un délai par défaut de **30 s**
+  (`m_connectTimeout = 30000` dans la lib) et est bloquant : `loop()` ne tourne pas, donc ni
+  `netTick()` (watchdog, `handleClient()` du port 80) ni le reste. Avec un poêle hors de
+  portée, chaque tentative gèle la boucle jusqu'à 30 s, puis un nouveau scan démarre.
+- `netTick()` : seul `WiFi.reconnect()` toutes les 20 s, jamais d'association complète.
+
+**Correctifs**
+- **Silence BLE pendant l'association** : `netBleHold()` est vrai tant que le Wi-Fi est
+  déconnecté et que moins de 30 s se sont écoulées depuis le début de la tentative (démarrage
+  ou watchdog). Pendant ce temps : pas de `startScan()` (sauf scan demandé par l'utilisateur),
+  scan en cours stoppé, connexion BLE différée (`g_doConnect` conservé). Wi-Fi établi : aucune
+  contrainte, comportement inchangé.
+- Scan BLE à rapport cyclique ~30 % (`setWindow(30)` pour `setInterval(100)`), pause de 2 s
+  entre deux scans automatiques, délai de connexion BLE ramené à 5 s (`setConnectTimeout(5)`).
+- **Watchdog Wi-Fi** : sans connexion depuis > 60 s : `WiFi.disconnect(true)` + `begin` complet
+  (`wifiBegin()`, qui refait aussi l'IP statique et `setSleep(true)`, toujours obligatoire avec
+  le BLE) ; sans connexion depuis > 10 min : `ESP.restart()` (loggé). Pendant un Wi-Fi absent,
+  le BLE dispose donc de ~30 s sur 60.
+- **Commande série `wifi`** : BLE mis en pause (scan arrêté, 200 ms) pendant `scanNetworks()` ;
+  un code négatif est affiché (`-1` en cours, `-2` échec) au lieu de « aucun réseau visible ».
+- **OTA / port 80** : `otaStart()` est rappelé à **chaque** (re)connexion STA (`stop()` +
+  `begin()` du `WebServer`, handlers enregistrés une seule fois) ; log `>> OTA: http://<ip>/update`.
+  `handleClient()` est appelé à chaque tour de `loop()` dès que le Wi-Fi est connecté ; seul
+  `connectTarget()` bloquait plusieurs secondes (maintenant ≤ 5 s). Nouveau `GET /` sans
+  authentification : `MCZ bridge OK`, date de build, IP, uptime, état OTA (page de diagnostic si
+  seul l'AP de secours est actif).
+- **MQTT** (capteurs diagnostic) : `Bridge IP` (`bridge_ip`), `OTA` (`ota_state` : `on` serveur à
+  l'écoute / `off` activée mais Wi-Fi absent / `disabled`), `Bridge uptime` (`bridge_uptime`, s),
+  `WiFi reconnections` (`wifi_reconnects`, associations après la première).
+
+**Limites / à valider sur le matériel** : le scan BLE à 30 % de rapport cyclique peut retarder la
+détection du poêle de quelques secondes ; un Wi-Fi qui ne revient jamais déclenche un reboot
+toutes les 10 min ; l'AP de secours (§7) reste ouvert à 60 s sans Wi-Fi, avec la même
+coexistence radio qu'avant. Cause non prouvée sur le matériel (hypothèse étayée par le code).
+Test : `wifi` en série (doit lister les réseaux), `curl http://<ip>/`.

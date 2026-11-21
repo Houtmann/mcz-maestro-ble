@@ -7,3 +7,4 @@ void netBegin();   // call in setup(): initialize WiFi + MQTT
 void netTick();    // call in loop(): keep connection alive, publish on-change/heartbeat
 bool netWifiUp();  // WiFi associated?
 bool netMqttUp();  // MQTT broker connected?
+bool netBleHold();   // vrai tant que le BLE doit se taire pour laisser le WiFi s'associer (PATCHES §16)

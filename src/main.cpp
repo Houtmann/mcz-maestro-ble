@@ -59,6 +59,10 @@ static NimBLEAdvertisedDevice    *g_target=nullptr;
 static bool                       g_doConnect=false, g_connected=false;
 static volatile bool              g_linkUp=false;
 static NimBLEScan                *g_scan=nullptr;
+static bool g_scanActive = false;
+static uint32_t g_scanEndMs = 0;                  // fin du dernier scan : pause avant le suivant (PATCHES §16)
+static bool g_bleSuspend = false;                 // BLE mis en pause (scan WiFi de la commande `wifi`)
+static inline bool bleHold(){ return g_bleSuspend || netBleHold(); }   // WiFi prioritaire sur le BLE
 static NimBLEClient              *g_client=nullptr;
 static NimBLERemoteCharacteristic *g_abf1=nullptr, *g_abf2=nullptr;
 
@@ -650,6 +654,7 @@ static bool connectTarget() {
   if(g_client){ NimBLEDevice::deleteClient(g_client); g_client=nullptr; }   // never leak a client
   g_client = NimBLEDevice::createClient();
   g_client->setClientCallbacks(&g_cliCb, false);   // false: don't delete callback object
+  g_client->setConnectTimeout(5);                  // defaut 30 s : connect() bloque loop() (donc WiFi/OTA) tout ce temps
   if(!g_client->connect(g_target)){ Serial.println(">> Connect error");
     NimBLEDevice::deleteClient(g_client); g_client=nullptr; return false; }
   g_linkUp = true;   // NimBLE connect() is synchronous
@@ -675,8 +680,11 @@ static void handleLine(String line){
     Serial.printf(">> WiFi status=%d (3=connected)  MAC=%s  IP=%s  RSSI=%d dBm\n",
                   (int)WiFi.status(), WiFi.macAddress().c_str(),
                   WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
-    Serial.printf(">> SSID cible='%s' — scan en cours...\n", g_cfg.wifiSsid.c_str());
+    Serial.printf(">> SSID cible='%s' — scan en cours (BLE en pause)...\n", g_cfg.wifiSsid.c_str());
+    g_bleSuspend = true; if(g_scanActive) g_scan->stop(); delay(200);   // le scan BLE affame le scan WiFi
     int n = WiFi.scanNetworks();
+    g_bleSuspend = false;
+    if(n<0){ Serial.printf("!! scanNetworks a echoue, code=%d (-1 en cours, -2 echec)\n", n); WiFi.scanDelete(); return; }
     for(int i=0;i<n;i++){
       bool mine = (WiFi.SSID(i) == g_cfg.wifiSsid);
       Serial.printf("   %-28s rssi=%-5d ch=%-3d%s\n", WiFi.SSID(i).c_str(),
@@ -741,9 +749,8 @@ static void handleLine(String line){
 
 // Non-blocking BLE scan (callback form) -> loop()/display stay reactive during the
 // scan (the blocking 2-arg form would have frozen setup()/loop() for ~8 s).
-static bool g_scanActive = false;
 static void scanDoneCB(NimBLEScanResults res){
-  g_scanActive = false;
+  g_scanActive = false; g_scanEndMs = millis();
   if (g_scanListMode){
     // Rebuild the oven list from the FINAL results: the MCZ name is only reliably
     // present here (the live onResult adv packet often has no name yet) -> the display
@@ -775,8 +782,8 @@ static void scanDoneCB(NimBLEScanResults res){
     bleScanListStop();                            // resume normal auto-connect
   }
 }
-static void startScan(){
-  if (g_scanActive) return;
+static void startScan(bool force=false){          // force : scan demande par l'utilisateur (liste des poeles)
+  if (g_scanActive || g_bleSuspend || (!force && netBleHold())) return;
   g_scan->clearResults(); g_scanActive = true;
   g_scan->start(SCAN_SECONDS, scanDoneCB, false);
 }
@@ -785,7 +792,7 @@ void bleScanListStart(){
   if (g_client && g_connected) g_client->disconnect();
   if (g_target){ delete g_target; g_target=nullptr; }
   g_connected=false; g_scanCount=0; g_scanListMode=true;
-  startScan();
+  startScan(true);
 }
 void bleScanListStop(){ g_scanListMode=false; g_scanCount=0; }   // normal auto-connect afterwards
 bool bleScanListBusy(){ return g_scanActive; }
@@ -801,7 +808,9 @@ void setup(){
   displayInstance().begin();  // display FIRST -> UI visible immediately (instead of ~8s white)
   NimBLEDevice::init(""); NimBLEDevice::setMTU(517); setupSecurity();
   g_scan=NimBLEDevice::getScan(); g_scan->setAdvertisedDeviceCallbacks(&g_scanCb);
-  g_scan->setActiveScan(true); g_scan->setInterval(100); g_scan->setWindow(99);
+  // window == interval (99/100) = scan continu : la radio est monopolisee et le WiFi est affame
+  // (association et scan WiFi impossibles). Rapport cyclique ~30 % : le WiFi garde la radio.
+  g_scan->setActiveScan(true); g_scan->setInterval(100); g_scan->setWindow(30);
   netBegin();                 // WiFi + MQTT (no-op with -DUSE_MQTT=0)
   configTzTime(OVEN_TZ, "pool.ntp.org");   // NTP -> oven clock (timezone from config.h)
   startScan();                // non-blocking
@@ -934,8 +943,10 @@ void loop(){
   static String line;
   while(Serial.available()){ char c=(char)Serial.read();
     if(c=='\n'||c=='\r'){ if(line.length()){handleLine(line);line="";} } else line+=c; }
-  if(g_doConnect){ g_doConnect=false;
-    if(!connectTarget()){ delete g_target; g_target=nullptr; startScan(); } return; }
+  bool hold = bleHold();                         // WiFi prioritaire : pas de scan/connexion BLE pendant l'association
+  if(hold && g_scanActive && !g_scanListMode) g_scan->stop();
+  if(g_doConnect && !hold){ g_doConnect=false;
+    if(!connectTarget()){ delete g_target; g_target=nullptr; g_scanEndMs=millis(); } return; }
   // BLE link dropped: free the stale client/target so a fresh scan+reconnect can start
   // (otherwise g_target stays set and the rescan below never runs -> stuck offline).
   if(!g_connected && g_client){
@@ -944,7 +955,7 @@ void loop(){
     g_abf1=g_abf2=nullptr;
     Serial.println(">> BLE cleanup after disconnect -> rescanning");
   }
-  if(!g_connected && !g_target && !g_scanActive){ startScan(); }
+  if(!g_connected && !g_target && !g_scanActive && !hold && millis()-g_scanEndMs >= 2000){ startScan(); }
   heartbeat();
   alarmScan();      // read alarm-log history (pauses pollTick while reading)
   pollTick();
