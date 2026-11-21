@@ -135,6 +135,25 @@ static void publishJson(const String& topic, JsonDocument& doc, bool retain){
 static String discoTopic(const char* component, const char* objectId){
   return String(HA_DISCOVERY_PREFIX) + "/" + component + "/" + g_id + "_" + objectId + "/config";
 }
+// Indice FR indicatif par code d'alarme (PATCHES §15) ; nullptr = pas d'attribut. A03 : delai seulement.
+static const char* alarmHint(int code){
+  switch(code){
+    case 2:  return "indicatif : echec allumage / extinction flamme";
+    case 4:  return "indicatif : surchauffe fumees";
+    case 5:  return "indicatif : defaut debit d'air / depression";
+    case 8:  return "indicatif : ventilateur fumees";
+    case 9:  return "indicatif : sonde fumees";
+    case 12: return "indicatif : vis sans fin";
+    case 13: return "indicatif : surchauffe carte electronique";
+    case 14: return "indicatif : debit d'air hors plage";
+    case 22: return "indicatif : sonde d'ambiance";
+    default: return nullptr;
+  }
+}
+// Template « {{ value_json.K if defined else '' }} » pour les capteurs ajoutes (cle absente = pas de valeur).
+static String optTpl(const char* key){
+  return String("{{ value_json.") + key + " if value_json." + key + " is defined else '' }}";
+}
 // Supprime une entite HA : config de decouverte vide, retenue, sur l'ancien topic.
 static void removeDiscovery(const char* component, const char* objectId){
   String t = discoTopic(component, objectId);
@@ -142,7 +161,8 @@ static void removeDiscovery(const char* component, const char* objectId){
   mqtt.loop(); delay(2);
 }
 static void addSensor(const char* objectId, const char* name, const char* valTpl,
-                      const char* unit, const char* devClass, const char* stateClass){
+                      const char* unit, const char* devClass, const char* stateClass,
+                      const char* category = nullptr, bool enabled = true){
   JsonDocument d;
   d["name"]               = name;
   d["unique_id"]          = g_id + "_" + objectId;
@@ -152,6 +172,8 @@ static void addSensor(const char* objectId, const char* name, const char* valTpl
   if (unit && *unit)             d["unit_of_measurement"] = unit;
   if (devClass && *devClass)     d["device_class"] = devClass;
   if (stateClass && *stateClass) d["state_class"] = stateClass;
+  if (category && *category)     d["entity_category"] = category;
+  if (!enabled)                  d["enabled_by_default"] = false;
   addDevice(d.as<JsonObject>());
   publishJson(discoTopic("sensor", objectId), d, true);
 }
@@ -277,7 +299,14 @@ static void publishDiscovery(){
   addSensor("power_actual", "Power (actual)",      "{{ value_json.power_actual }}", "", "", "measurement");
   removeDiscovery("sensor", "fan_comb");   // ancien « Combustion fan » (0x02CE = consigne vis sans fin)
   removeDiscovery("sensor", "active");     // ancien « Active » (0x02C9 = pression d'air)
-  addSensor("phase", "Phase", "{{ value_json.phase_name }}", "", "", "");
+  { JsonDocument d;                              // Phase + attributs fase_op / sub_fase_op (octets bas / haut de 0x0320)
+    d["name"]="Phase"; d["unique_id"]=g_id+"_phase";
+    d["availability_topic"]=T_AVAIL; d["state_topic"]=T_STATE;
+    d["value_template"]="{{ value_json.phase_name }}";
+    d["json_attributes_topic"]=T_STATE;
+    d["json_attributes_template"]="{% if value_json.fase_op is defined %}{{ {'fase_op': value_json.fase_op, 'sub_fase_op': value_json.sub_fase_op} | tojson }}{% else %}{}{% endif %}";
+    addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","phase"), d, true);
+  }
   addSensor("ignitions", "Ignitions", "{{ value_json.ignitions }}", "", "", "total_increasing");
   addSensor("worktime", "Total working time", "{{ value_json.worktime_h }}", "h", "duration", "total_increasing");
   for (int i=1;i<=5;i++){
@@ -287,6 +316,19 @@ static void publishDiscovery(){
     snprintf(tpl,  sizeof(tpl),  "{{ value_json.pt%d_h }}", i);
     addSensor(oid, name, tpl, "h", "duration", "total_increasing");
   }
+  // Capteurs ajoutes d'apres la table M2 (PATCHES §15). Valeurs hors plage / sentinelles non publiees.
+  addSensor("outdoor_temp", "Outdoor temperature", optTpl("outdoor_temp").c_str(), "°C", "temperature", "measurement");
+  addSensor("panel_temp", "Panel temperature", optTpl("panel_temp").c_str(), "°C", "temperature", "measurement", "diagnostic");
+  addSensor("pellet_autonomy", "Pellet autonomy (raw, a valider)", optTpl("pellet_autonomy").c_str(), "", "", "measurement");
+  addSensor("sleep_time", "Sleep time (raw, a valider)", optTpl("sleep_time").c_str(), "", "", "", "diagnostic", false);
+  addSensor("bat_v1", "Backup battery 1 voltage", optTpl("bat_v1").c_str(), "V", "voltage", "measurement", "diagnostic", false);
+  addSensor("bat_v2", "Backup battery 2 voltage", optTpl("bat_v2").c_str(), "V", "voltage", "measurement", "diagnostic", false);
+  addSensor("bat_cv1", "Backup battery 1 charge voltage", optTpl("bat_cv1").c_str(), "V", "voltage", "measurement", "diagnostic", false);
+  addSensor("bat_cv2", "Backup battery 2 charge voltage", optTpl("bat_cv2").c_str(), "V", "voltage", "measurement", "diagnostic", false);
+  addSensor("bat_level_panel", "Backup battery level (panel)", optTpl("bat_level_panel").c_str(), "%", "", "measurement", "diagnostic", false);
+  addSensor("bat_level_abs", "Backup battery level (absolute)", optTpl("bat_level_abs").c_str(), "%", "", "measurement", "diagnostic", false);
+  addSensor("bat_status", "Backup battery status (flags)", optTpl("bat_status").c_str(), "", "", "", "diagnostic", false);
+  addSensor("bat_capacity", "Backup battery capacity (raw)", optTpl("bat_capacity").c_str(), "", "", "", "diagnostic", false);
   // Live alarm (0x0323): is the oven in an alarm RIGHT NOW? + button to acknowledge it.
   { JsonDocument d;
     d["name"]="Alarm"; d["unique_id"]=g_id+"_alarm_active";
@@ -294,7 +336,7 @@ static void publishDiscovery(){
     d["value_template"]="{{ 'ON' if value_json.alarm_active else 'OFF' }}";
     d["device_class"]="problem";
     d["json_attributes_topic"]=T_STATE;
-    d["json_attributes_template"]="{{ {'code': value_json.alarm} | tojson }}";
+    d["json_attributes_template"]="{% set a = {'code': value_json.alarm} %}{% if value_json.alarm_hint is defined %}{% set a = dict(a, hint=value_json.alarm_hint) %}{% endif %}{{ a | tojson }}";
     addDevice(d.as<JsonObject>()); publishJson(discoTopic("binary_sensor","alarm_active"), d, true);
   }
   { JsonDocument d;
@@ -330,6 +372,8 @@ static void publishDiscovery(){
     d["name"]="Last alarm"; d["unique_id"]=g_id+"_alarm_last";
     d["availability_topic"]=T_AVAIL; d["state_topic"]=T_STATE;
     d["value_template"]="{{ value_json.alarm_last }}"; d["icon"]="mdi:alert-circle-outline";
+    d["json_attributes_topic"]=T_STATE;
+    d["json_attributes_template"]="{% if value_json.alarm_last_hint is defined %}{{ {'hint': value_json.alarm_last_hint} | tojson }}{% else %}{}{% endif %}";
     addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","alarm_last"), d, true);
   }
   { JsonDocument d;
@@ -366,7 +410,9 @@ static void publishState(){
     d["state"] = g_oven.state;                 // raw fine-phase code (0x0320)
     const char* sn = stateName(g_oven.state);
     if (sn[0]) d["phase_name"] = sn;
-    else { char b[12]; snprintf(b,sizeof(b),"0x%04X",(unsigned)g_oven.state); d["phase_name"] = b; }
+    else { char b[24]; snprintf(b,sizeof(b),"Phase %u/%u",(unsigned)(g_oven.state&0xFF),(unsigned)((g_oven.state>>8)&0xFF)); d["phase_name"] = b; }
+    d["fase_op"] = g_oven.state & 0xFF;        // octet bas de 0x0320
+    d["sub_fase_op"] = (g_oven.state >> 8) & 0xFF;   // octet haut
   }
   if (g_oven.fanLevel>=1 && g_oven.fanLevel<=6) d["fan_level"] = g_oven.fanLevel;
   if (g_oven.fan2Set>=1 && g_oven.fan2Set<=6) d["fan2"] = (g_oven.fan2Set==6) ? String("Auto") : String((int)g_oven.fan2Set);
@@ -378,6 +424,16 @@ static void publishState(){
   if (!isnan(g_oven.pressurePa)) d["air_pressure_pa"] = roundf(g_oven.pressurePa*10)/10.0;  // 0x02C8, Pa
   if (!isnan(g_oven.pressure))   d["air_pressure"]    = roundf(g_oven.pressure*10)/10.0;    // 0x02C9, unite inconnue
   if (g_oven.powerNow>=0)      d["power_actual"] = g_oven.powerNow;          // 0x0323 octet haut
+  if (!isnan(g_oven.outdoorC)) d["outdoor_temp"] = roundf(g_oven.outdoorC*10)/10.0;   // 0x02C3
+  if (!isnan(g_oven.panelC))   d["panel_temp"]   = roundf(g_oven.panelC*10)/10.0;     // 0x02C7
+  if (g_oven.pelletAuto>=0)    d["pellet_autonomy"] = g_oven.pelletAuto;              // 0x032A brut
+  if (g_oven.sleepT>=0)        d["sleep_time"]   = g_oven.sleepT;                     // 0x0389 (##)
+  { static const char* BK[4] = {"bat_v1","bat_v2","bat_cv1","bat_cv2"};
+    for (int i=0;i<4;i++) if (!isnan(g_oven.batV[i])) d[BK[i]] = roundf(g_oven.batV[i]*10)/10.0; }
+  if (g_oven.batPanel>=0)      d["bat_level_panel"] = g_oven.batPanel;
+  if (g_oven.batAbs>=0)        d["bat_level_abs"]   = g_oven.batAbs;
+  if (g_oven.batStatus>=0)     d["bat_status"]   = g_oven.batStatus;
+  if (g_oven.batCap>=0)        d["bat_capacity"] = g_oven.batCap;
   if (g_oven.serviceH>=0)      d["service_h"]    = g_oven.serviceH;          // 0x034E-F, heures
   if (g_oven.resetCause>=0)    d["reset_cause"]  = g_oven.resetCause;        // 0x0351
   if (g_oven.flagsOk){ d["chrono"] = (g_oven.flags>>6)&1; d["silent"] = (g_oven.flags>>5)&1; }
@@ -393,13 +449,15 @@ static void publishState(){
   if (g_ovenSerial.length()) d["serial"] = g_ovenSerial;
   if (g_oven.alarm >= 0){                        // live alarm: "A12" while active, else "none"
     d["alarm_active"] = g_oven.alarm > 0;
-    if (g_oven.alarm > 0){ char a[8]; snprintf(a,sizeof(a),"A%d",g_oven.alarm); d["alarm"] = a; }
+    if (g_oven.alarm > 0){ char a[8]; snprintf(a,sizeof(a),"A%d",g_oven.alarm); d["alarm"] = a;
+      const char* h = alarmHint(g_oven.alarm); if (h) d["alarm_hint"] = h; }
     else d["alarm"] = "none";
   }
   if (g_oven.alarmHist[0] >= 0){                 // alarm log (raw Axx codes, newest first)
     char la[8];
     if (g_oven.alarmHist[0] > 0) snprintf(la,sizeof(la),"A%d",g_oven.alarmHist[0]); else strncpy(la,"none",sizeof(la));
     d["alarm_last"] = la;
+    { const char* h = alarmHint(g_oven.alarmHist[0]); if (h) d["alarm_last_hint"] = h; }
     String hist; JsonArray codes = d["alarm_codes"].to<JsonArray>();
     for (int k=0;k<10 && g_oven.alarmHist[k]>=0;k++){
       if (g_oven.alarmHist[k] <= 0) continue;

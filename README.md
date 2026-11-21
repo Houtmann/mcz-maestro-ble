@@ -44,6 +44,12 @@ besides Docker:
 The first flash has to be over USB (browser, esptool-js); OTA also needs a partition table with
 two OTA slots (not `huge_app.csv`). Files, offsets and caveats: see `PATCHES.md` section 14.
 
+## Extra entities
+
+Outdoor/panel temperature, pellet autonomy, phase attributes (`fase_op`/`sub_fase_op`), alarm
+`hint` attributes and (disabled by default) backup-battery diagnostics: see `PATCHES.md`
+section 15, including what still has to be validated over serial.
+
 ## Disabling the Cloud Connection
 
 With this solution in place, you can disable the oven's Wi-Fi connection entirely. If you prefer to block the connection at your router instead, note that the oven tries to reach the hostname *m.maestro.mcz.it*.

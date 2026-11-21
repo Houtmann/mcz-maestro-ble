@@ -46,7 +46,16 @@ static const uint16_t REG_AUGER_SET   = 0x02CE; // 718 vel_imp_coclea : consigne
 static const uint16_t REG_AUGER_REAL  = 0x02CF; // 719 vel_real_coclea : vitesse reelle vis sans fin (uint16)
 static const uint16_t REG_FUMES_FAN_SET  = 0x02D1; // 721 vel_imp_ventola_fumi : consigne ventilateur fumees (uint16)
 static const uint16_t REG_FUMES_FAN_REAL = 0x02D2; // 722 vel_real_ventola_fumi : vitesse reelle ventilateur fumees (uint16)
+static const uint16_t REG_TEMP_EXT    = 0x02C3; // 707 temp_sonda_est : temperature exterieure, type 3 (÷10, signe)
+static const uint16_t REG_TEMP_PAN    = 0x02C7; // 711 temp_pan : temperature panneau, type 3
+static const uint16_t REG_BAT_V1      = 0x02E6; // 742 battery_voltage_1 (type 3, V) ; 743 _2 ; 744/745 battery_charge_voltage_1/2
+static const uint16_t REG_BAT_CV2     = 0x02E9; //   (bloc 700-750 ; « BLDC only » d'apres le CSV)
 // Bloc 0x0320 x77 (800-876) :
+static const uint16_t REG_PELLET_AUTO = 0x032A; // 810 auto_pellet : autonomie pellets (uint16, unite inconnue)
+static const uint16_t REG_BAT_LEVEL   = 0x0365; // 869 hi=panel_battery_charge_level, lo=absolute_battery_charge_level (octets)
+static const uint16_t REG_BAT_STATUS  = 0x0368; // 872 battery_status (flags)
+static const uint16_t REG_BAT_CAP     = 0x0369; // 873 battery_capacity (uint16)
+static const uint16_t REG_SLEEP_T     = 0x0389; // 905 tempo_sleep (uint16) : HORS de nos blocs de lecture, recu seulement via l'image ##
 static const uint16_t REG_SERVICE_LO  = 0x034E; // 846-847 ore_service : heures avant entretien (uint32, mot bas d'abord)
 static const uint16_t REG_SERVICE_HI  = 0x034F;
 static const uint16_t REG_RESET_CAUSE = 0x0351; // 849 dia_res_cau : cause de reset (uint16, diagnostic)
@@ -107,6 +116,15 @@ struct OvenState {
   float    pumpMinOn  = NAN;   // Circulation pump min on-temperature (0x0403)
   float    pufferSet  = NAN;   // Buffer/water setpoint set_puffer (0x0412)
   float    boardC     = NAN;   // Control board temperature
+  float    outdoorC   = NAN;   // Outdoor probe (0x02C3), NaN = absente/invalide
+  float    panelC     = NAN;   // Panel temperature (0x02C7)
+  float    batV[4]    = {NAN,NAN,NAN,NAN};  // battery_voltage_1/2, battery_charge_voltage_1/2 (0x02E6..E9), V
+  int32_t  pelletAuto = -1;    // auto_pellet (0x032A), brut
+  int16_t  batPanel   = -1;    // panel_battery_charge_level (0x0365 hi), 0..100
+  int16_t  batAbs     = -1;    // absolute_battery_charge_level (0x0365 lo), 0..100
+  int32_t  batStatus  = -1;    // battery_status (0x0368)
+  int32_t  batCap     = -1;    // battery_capacity (0x0369)
+  int32_t  sleepT     = -1;    // tempo_sleep (0x0389), via ## seulement
   float    pressurePa = NAN;   // Air pressure, Pa (0x02C8 pressione_pascal)
   float    pressure   = NAN;   // Air pressure, unite inconnue (0x02C9 pressione)
   float    fumesC     = NAN;   // Flue gas temperature
@@ -152,7 +170,8 @@ inline const char* modeName(int m){
              case 3:return "Comfort"; case 4:return "Turbo"; default:return "?"; }
 }
 
-// Fine phase/operating state from REG_STATE (0x0320)
+// Fine phase/operating state from REG_STATE (0x0320) : octet bas = fase_op, octet haut = sub_fase_op.
+// Pas de code « refroidissement » identifie : les codes inconnus restent generiques cote MQTT.
 inline const char* stateName(int s){
   switch(s){
     case 0x0000: return "Off";
@@ -163,7 +182,8 @@ inline const char* stateName(int s){
     case 0x0501: return "Stabilization";
     case 0x0601: return "Anti-condensation";
     case 0x0202: return "On";
-    case 0x0103: return "Turning off";
+    case 0x0103: return "Turning off";       // sub 1 / phase 3
+    case 0x0203: return "Turning off 2";     // sub 2 / phase 3 (hypothese : 2e etape de l'arret)
     default:     return "";
   }
 }

@@ -365,3 +365,45 @@ dans `[env:esp32dev]` (ou `[env]`).
 `boot_app0.bin` : `docker run --rm -v pio-cache:/c -v "$PWD":/out python:3.12-slim cp /c/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin /out/`.
 Ensuite, mises à jour par `ota.sh`. Vérifié : compilation `esp32dev` (OTA désactivée) et
 `esp32dev_diag` avec `-DOTA_PASSWORD=\"x\"` (OTA compilée) ; **non testé sur le matériel**.
+
+## 15. Capteurs et attributs supplémentaires d'après la table M2
+
+Tous les registres sont dans nos blocs de lecture existants (`0x02BC` ×51 = 700-750,
+`0x0320` ×77 = 800-876) : **aucune lecture BLE ajoutée**, sauf le cas 905 ci-dessous.
+Aucune valeur aberrante n'est publiée (0xFFFF / 0x7FFF / 0x8000 et hors plage → clé absente).
+
+| Entité (`unique_id` `<id>_…`) | Registre (clé CSV) | Notes |
+|---|---|---|
+| `outdoor_temp` | 0x02C3 / 707 `temp_sonda_est` | type 3 signé ÷10, plage -40..60 °C, `temperature` |
+| `panel_temp` | 0x02C7 / 711 `temp_pan` | diagnostic, plage -20..100 °C |
+| `pellet_autonomy` | 0x032A / 810 `auto_pellet` | uint16 brut, **unité inconnue, à valider** |
+| `bat_v1`, `bat_v2`, `bat_cv1`, `bat_cv2` | 0x02E6..E9 / 742-745 | V, plage 0..60 V |
+| `bat_level_panel`, `bat_level_abs` | 0x0365 / 869 (octet haut / bas) | %, 0..100 |
+| `bat_status`, `bat_capacity` | 0x0368 / 872, 0x0369 / 873 | bruts |
+| `sleep_time` | 0x0389 / 905 `tempo_sleep` | **hors de nos blocs** : alimenté seulement si l'image `##` (base 0x02BA) le contient |
+
+Les entités batterie et `sleep_time` sont des diagnostics **désactivés par défaut**
+(`enabled_by_default: false`) : le CSV les range en « BLDC only » / « undefined », sans objet
+probable sur ce poêle AIR. 0 °C ne peut pas être distingué d'une sonde extérieure absente si
+elle renvoie 0 : à voir sur le poêle.
+
+**Phase** : le capteur `Phase` expose en attributs `fase_op` (octet bas de 0x0320) et
+`sub_fase_op` (octet haut). `stateName` reçoit `0x0203` « Turning off 2 » (**hypothèse** : même
+phase 3, sous-phase 2 ; `0x0103` garde son libellé « Turning off » pour ne pas casser d'éventuelles
+automatisations). Aucun code « refroidissement » n'est identifié : un code inconnu s'affiche
+désormais « Phase <fase>/<sub> » au lieu de `0xNNNN`.
+
+**Alarmes** : attribut `hint` (« indicatif : … ») sur le capteur « Last alarm » et le binary_sensor
+« Alarm » pour A02, A04, A05, A08, A09, A12, A13, A14, A22 ; A03 (délai seulement) et les codes
+inconnus : pas d'attribut. Table statique `alarmHint()` dans `net_mqtt.cpp`, indicative.
+
+**Commandes 908 / 909 / 917 : NON exposées.** Le CSV les donne en **type 4** (uint16, paramètre),
+pas type 13 (commande) comme `com_on_off` 906 / `com_reset_allarm` 907 : rien ne prouve qu'une
+écriture de 1 déclenche l'action. Pas de bouton MQTT ni de commande série dédiée ; la commande
+série générique `w <regHex> <valHex>` (908 = 0x038C, 909 = 0x038D, 917 = 0x0395) reste
+disponible pour un essai manuel, à vos risques.
+
+**À valider par lecture série** : `r 02C3 1`, `r 02C7 1`, `r 02E6 4` (sondes, batteries),
+`r 032A 1` (unité de l'autonomie : comparer à la consommation réelle), `r 0365 1`, `r 0368 2`,
+`r 0389 1` (905 hors blocs, lecture directe), `r 0320 1` en phase d'arrêt pour confirmer
+0x0203 et chercher le code de refroidissement, et un déclenchement d'alarme réel pour les `hint`.

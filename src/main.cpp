@@ -201,6 +201,14 @@ static bool counterPlausible(CounterGuard& g, const char* what, int32_t prev, in
                   what, (long)prev, (long)next, (long)maxJump);
   return false;
 }
+// Garde-fou capteurs (PATCHES §15) : sentinelles 0xFFFF/0x7FFF/0x8000 et valeurs hors plage -> NaN (non publie).
+static float sensorTemp(uint16_t raw, float lo, float hi){
+  if (raw==0xFFFF || raw==0x7FFF || raw==0x8000) return NAN;
+  float c=(int16_t)raw/10.0f; return (c<lo || c>hi) ? NAN : c;
+}
+static void setF(float& dst, float v){      // bumpSeq seulement si change (NaN == NaN)
+  if (dst!=v && !(isnan(dst)&&isnan(v))){ dst=v; bumpSeq(); } }
+static void setI32(int32_t& dst, int32_t v){ if (dst!=v){ dst=v; bumpSeq(); } }
 void ovenApplyReg(uint16_t reg, uint16_t val){
   DIAG_CHECK(reg, val);              // diagnostic : evenement si hors plage attendue (aucun effet sur le decodage)
   static uint16_t workLo = 0;        // low word of the 32-bit work time (persists between calls)
@@ -282,6 +290,17 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_IGNIT:  { static CounterGuard ig;
                        if(counterPlausible(ig, "ignitions", g_oven.ignitions, (int32_t)val, 20, 200000)
                           && g_oven.ignitions!=(int32_t)val){g_oven.ignitions=(int32_t)val;bumpSeq();} } break;
+    case REG_TEMP_EXT:    setF(g_oven.outdoorC, sensorTemp(val,-40.0f,60.0f)); break;
+    case REG_TEMP_PAN:    setF(g_oven.panelC,   sensorTemp(val,-20.0f,100.0f)); break;
+    case REG_BAT_V1: case REG_BAT_V1+1: case REG_BAT_V1+2: case REG_BAT_CV2:
+                          setF(g_oven.batV[reg-REG_BAT_V1], sensorTemp(val,0.0f,60.0f)); break;   // tension en V, ÷10
+    case REG_PELLET_AUTO: setI32(g_oven.pelletAuto, (val==0xFFFF||val==0x7FFF)?-1:(int32_t)val); break;
+    case REG_BAT_LEVEL: { int p=val>>8, a=val&0xFF;
+        if(g_oven.batPanel!=(p<=100?p:-1)){ g_oven.batPanel=(p<=100?p:-1); bumpSeq(); }
+        if(g_oven.batAbs  !=(a<=100?a:-1)){ g_oven.batAbs  =(a<=100?a:-1); bumpSeq(); } } break;
+    case REG_BAT_STATUS:  setI32(g_oven.batStatus, (val==0xFFFF||val==0x7FFF)?-1:(int32_t)val); break;
+    case REG_BAT_CAP:     setI32(g_oven.batCap,    (val==0xFFFF||val==0x7FFF)?-1:(int32_t)val); break;
+    case REG_SLEEP_T:     setI32(g_oven.sleepT,    (val==0xFFFF||val==0x7FFF)?-1:(int32_t)val); break;
     case REG_PRESSURE_PA: { float c=(int16_t)val/10.0f; if(g_oven.pressurePa!=c || isnan(g_oven.pressurePa)){g_oven.pressurePa=c;bumpSeq();} } break;
     case REG_PRESSURE:    { float c=(int16_t)val/10.0f; if(g_oven.pressure  !=c || isnan(g_oven.pressure))  {g_oven.pressure  =c;bumpSeq();} } break;
     // Vitesses (uint16) : 0xFFFF = valeur invalide, ignore.
@@ -451,6 +470,15 @@ static void printStatus(){
   if (g_oven.augerReal>=0)      Serial.printf("  Auger real       = %ld\n", (long)g_oven.augerReal);
   if (!isnan(g_oven.pressurePa)) Serial.printf("  Air pressure     = %.1f Pa\n", g_oven.pressurePa);
   if (!isnan(g_oven.pressure))  Serial.printf("  Air pressure raw = %.1f (0x02C9, unit unknown)\n", g_oven.pressure);
+  if (!isnan(g_oven.outdoorC))  Serial.printf("  Outdoor temp     = %.1f C\n", g_oven.outdoorC);
+  if (!isnan(g_oven.panelC))    Serial.printf("  Panel temp       = %.1f C\n", g_oven.panelC);
+  if (g_oven.pelletAuto>=0)     Serial.printf("  Pellet autonomy  = %ld (raw, unit to validate)\n", (long)g_oven.pelletAuto);
+  if (g_oven.sleepT>=0)         Serial.printf("  Sleep time 0x0389= %ld (only via ## image)\n", (long)g_oven.sleepT);
+  if (g_oven.batStatus>=0 || g_oven.batCap>=0 || !isnan(g_oven.batV[0]) || !isnan(g_oven.batV[1]))
+    Serial.printf("  Backup battery   = V1 %.1f V2 %.1f chg1 %.1f chg2 %.1f lvl %d/%d status 0x%lX cap %ld\n",
+                  isnan(g_oven.batV[0])?0:g_oven.batV[0], isnan(g_oven.batV[1])?0:g_oven.batV[1],
+                  isnan(g_oven.batV[2])?0:g_oven.batV[2], isnan(g_oven.batV[3])?0:g_oven.batV[3],
+                  g_oven.batPanel, g_oven.batAbs, (unsigned long)(g_oven.batStatus<0?0:g_oven.batStatus), (long)g_oven.batCap);
   if (g_oven.powerNow>=0)       Serial.printf("  Power (actual)   = %d\n", g_oven.powerNow);
   if (g_oven.serviceH>=0)       Serial.printf("  Hours to service = %ld\n", (long)g_oven.serviceH);
   if (g_oven.resetCause>=0)     Serial.printf("  Reset cause      = %ld\n", (long)g_oven.resetCause);
