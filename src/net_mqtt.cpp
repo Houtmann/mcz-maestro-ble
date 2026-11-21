@@ -99,6 +99,14 @@ static float hydroVal(uint16_t reg){    // current OvenState value for a hydro-p
   } return NAN;
 }
 
+// Corrections de recettes (PATCHES §18) : number -3..+3 = registre brut - 4 (valide le 21/11). object_id = cle JSON = set/<id>.
+struct RecipeNum { const char* oid; const char* name; int which; };   // which : 1 = pellets (0x0579), 2 = active (0x057A)
+static const RecipeNum RECIPE_NUMS[] = {
+  {"recipe_pellet_corr", "Correction pellets", 1},
+  {"recipe_active_corr", "Correction active",  2},   // 0x057A pos_ric_flu = « Active » de l'appli
+};
+static const int RECIPE_NUM_CNT = sizeof(RECIPE_NUMS)/sizeof(RECIPE_NUMS[0]);
+
 // ---- Identity / Topics ----------------------------------------------------
 static void buildDevName(){
   // Name uses the same MAC as MQTT topic/ID (g_id) -> immediately correct, no waiting for serial.
@@ -364,6 +372,37 @@ static void publishDiscovery(){
   addSensor("bat_level_abs", "Backup battery level (absolute)", optTpl("bat_level_abs").c_str(), "%", "", "measurement", "diagnostic", false);
   addSensor("bat_status", "Backup battery status (flags)", optTpl("bat_status").c_str(), "", "", "", "diagnostic", false);
   addSensor("bat_capacity", "Backup battery capacity (raw)", optTpl("bat_capacity").c_str(), "", "", "", "diagnostic", false);
+  // Recettes air / pellets / flux (PATCHES §18) : valeurs brutes (codage a valider) + index du registre 867.
+  addSensor("recipe_air_raw",    "Recette tirage (brut)",    optTpl("recipe_air_raw").c_str(),    "", "", "", "diagnostic");
+  addSensor("recipe_pellet_raw", "Recipe pellet (raw)", optTpl("recipe_pellet_raw").c_str(), "", "", "", "diagnostic");
+  addSensor("recipe_flow_raw",   "Recipe flow (raw)",   optTpl("recipe_flow_raw").c_str(),   "", "", "", "diagnostic");
+  addSensor("recipe_flow_index",   "Recipe flow index",   optTpl("recipe_flow_index").c_str(),   "", "", "", "diagnostic");
+  addSensor("recipe_pellet_index", "Recipe pellet index", optTpl("recipe_pellet_index").c_str(), "", "", "", "diagnostic");
+  removeDiscovery("number", "recipe_air_corr");   // ancienne « Correction air » (0x0578 non exposee par l'appli) : config vide retenue
+  { JsonDocument d;                              // mode adaptatif 0x05F7 (lecture seule)
+    d["name"]="Mode adaptatif"; d["unique_id"]=g_id+"_adaptive_mode";
+    d["availability_topic"]=T_AVAIL; d["state_topic"]=T_STATE;
+    d["value_template"]=optTpl("adaptive_mode"); d["payload_on"]="ON"; d["payload_off"]="OFF";
+    d["entity_category"]="diagnostic";
+    addDevice(d.as<JsonObject>()); publishJson(discoTopic("binary_sensor","adaptive_mode"), d, true);
+  }
+  for (int i=0;i<RECIPE_NUM_CNT;i++){            // corrections -3..+3 (brut - 4, hypothese) ; absentes si RECIPE_WRITE=0
+    const RecipeNum& r = RECIPE_NUMS[i];
+#if RECIPE_WRITE
+    JsonDocument d;
+    d["name"]      = r.name;
+    d["unique_id"] = g_id + "_" + r.oid;
+    d["availability_topic"] = T_AVAIL;
+    d["command_topic"] = T_BASE + "/set/" + r.oid;
+    d["state_topic"]   = T_STATE;
+    d["value_template"]= optTpl(r.oid);
+    d["min"] = -3; d["max"] = 3; d["step"] = 1; d["mode"] = "box"; d["entity_category"] = "config";
+    addDevice(d.as<JsonObject>());
+    publishJson(discoTopic("number", r.oid), d, true);
+#else
+    removeDiscovery("number", r.oid);
+#endif
+  }
   // Live alarm (0x0323): is the oven in an alarm RIGHT NOW? + button to acknowledge it.
   { JsonDocument d;
     d["name"]="Alarm"; d["unique_id"]=g_id+"_alarm_active";
@@ -471,6 +510,17 @@ static void publishState(){
   if (g_oven.batCap>=0)        d["bat_capacity"] = g_oven.batCap;
   if (g_oven.serviceH>=0)      d["service_h"]    = g_oven.serviceH;          // 0x034E-F, heures
   if (g_oven.resetCause>=0)    d["reset_cause"]  = g_oven.resetCause;        // 0x0351
+  if (g_oven.recipeAirRaw>=0)    d["recipe_air_raw"]    = g_oven.recipeAirRaw;      // 0x0578 brut
+  if (g_oven.recipePelletRaw>=0) d["recipe_pellet_raw"] = g_oven.recipePelletRaw;   // 0x0579 brut
+  if (g_oven.recipeFlowRaw>=0)   d["recipe_flow_raw"]   = g_oven.recipeFlowRaw;     // 0x057A brut
+  if (g_oven.recipeFlowIdx>=0)   d["recipe_flow_index"]   = g_oven.recipeFlowIdx;   // 0x0363 octet haut
+  if (g_oven.adaptiveOn>=0)      d["adaptive_mode"] = g_oven.adaptiveOn ? "ON" : "OFF";   // 0x05F7 octet haut
+  if (g_oven.recipePelletIdx>=0) d["recipe_pellet_index"] = g_oven.recipePelletIdx; // 0x0363 octet bas
+#if RECIPE_WRITE
+  // Correction publiee seulement si le brut relu est dans 1..7 (hypothese de codage) ; sinon pas d'etat.
+  if (g_oven.recipePelletRaw>=1 && g_oven.recipePelletRaw<=7) d["recipe_pellet_corr"] = (int)g_oven.recipePelletRaw - 4;
+  if (g_oven.recipeFlowRaw>=1   && g_oven.recipeFlowRaw<=7)   d["recipe_active_corr"] = (int)g_oven.recipeFlowRaw - 4;
+#endif
   if (g_oven.flagsOk){ d["chrono"] = (g_oven.flags>>6)&1; d["silent"] = (g_oven.flags>>5)&1; }
   if (g_oven.ignitions>=0)   d["ignitions"]    = g_oven.ignitions;
   // Compteurs internes en minutes, publies en heures a 2 decimales (resolution 1 min).
@@ -562,6 +612,15 @@ static void onMqtt(char* topic, byte* payload, unsigned int len){
   }
   else if (t == T_BASE + "/set/fan2"){ String m=msg; m.toLowerCase(); ovenSetFanN(2, m=="auto"?0:msg.toInt()); }
   else if (t == T_BASE + "/set/fan3"){ String m=msg; m.toLowerCase(); ovenSetFanN(3, m=="auto"?0:msg.toInt()); }
+#if RECIPE_WRITE
+  else if (t == T_BASE + "/set/recipe_pellet_corr" || t == T_BASE + "/set/recipe_active_corr"){
+    // Entier strict : un texte vide ou non numerique ne doit jamais devenir 0 (toInt/toFloat renvoient 0).
+    bool num = msg.length() > 0 && (isDigit(msg[0]) || ((msg[0]=='-' || msg[0]=='+') && msg.length() > 1 && isDigit(msg[1])));
+    float f = msg.toFloat();
+    if (!num || fabsf(f - roundf(f)) > 0.001f){ Serial.printf("!! recipe: consigne '%s' invalide (entier -3..+3), rejetee\n", msg.c_str()); return; }
+    ovenSetRecipe(t.endsWith("recipe_active_corr") ? 2 : 1, (int)lroundf(f));
+  }
+#endif
   else for (int i=0;i<HYDRO_NUM_CNT;i++){                  // hydro settings (set/<oid>)
     if (t == T_BASE + "/set/" + HYDRO_NUMS[i].oid){ ovenSetTempParam(HYDRO_NUMS[i].reg, msg.toFloat()); break; }
   }
@@ -586,6 +645,9 @@ static bool mqttConnect(){
   mqtt.subscribe((T_BASE + "/set/fan2").c_str());
   mqtt.subscribe((T_BASE + "/set/fan3").c_str());
   mqtt.subscribe(T_SET_ALARM_RESET.c_str());
+#if RECIPE_WRITE
+  for (int i=0;i<RECIPE_NUM_CNT;i++) mqtt.subscribe((T_BASE + "/set/" + RECIPE_NUMS[i].oid).c_str());
+#endif
   for (int i=0;i<HYDRO_NUM_CNT;i++)                 // hydro settings (harmless if not a hydro oven)
     mqtt.subscribe((T_BASE + "/set/" + HYDRO_NUMS[i].oid).c_str());
   publishDiscovery(); g_discSerial = g_ovenSerial;  // name = MAC -> immediately correct

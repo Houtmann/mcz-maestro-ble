@@ -70,3 +70,8 @@
 // Mot de passe ci-dessous ; absent ou "" = OTA desactivee. Valeur bidon : a changer.
 // Necessite une table de partitions a deux slots OTA (esp32dev : default.csv ; pas cyd).
 #define OTA_PASSWORD   "change-me"
+
+// ---- Ecriture des recettes air / pellets (PATCHES.md §18) -------------------
+// 1 (defaut) : entites number « Correction pellets / air » (-3..+3, brut = valeur + 4, codage A VALIDER).
+// 0 : aucune ecriture (la lecture et les capteurs bruts restent). Surchargeable ici.
+// #define RECIPE_WRITE  1

@@ -87,6 +87,15 @@ static uint16_t*     g_rawDst = nullptr;
 static volatile int  g_rawGot = -1;
 static bool     g_logRaw = true;        // verbose Modbus dumps (quieter via 'log off')
 static const uint32_t POLL_INTERVAL_MS = 2500;  // auto-poll rate per status block
+// Recettes (PATCHES §18) : lecture de 0x0578 x3 toutes les 5 min + apres connexion + a la demande.
+static const uint32_t RECIPE_POLL_MS = 300000;  // cadence lente
+static const uint32_t RECIPE_MAX_AGE_MS = 600000; // ecriture refusee si la derniere lecture valide est plus vieille
+static const uint32_t RECIPE_WRITE_GAP_MS = 10000; // 1 ecriture / 10 s / registre
+static bool     g_recipeReq = true;             // lecture demandee (vrai apres connexion : voir setupChars)
+static uint32_t g_recipeReqAt = 0;              // millis() avant lequel la lecture demandee attend (laisse passer l'echo d'ecriture)
+static bool     g_adaptReq = false;             // lecture 0x05F7 x1 a faire au creneau suivant la lecture des recettes
+static uint32_t g_recipeLastReqMs = 0;          // derniere demande (cadence)
+static uint32_t g_recipeReadMs = 0;             // millis() de la derniere lecture valide (0 = jamais)
 
 // ---- Modbus CRC16 ----------------------------------------------------------
 static uint16_t modbusCRC(const uint8_t *d, size_t n) {
@@ -168,6 +177,20 @@ bool bleReadRegs(uint16_t reg, uint16_t count, uint16_t* dst){
 
 // ---- Register -> OvenState (source irrelevant: poll read or ##-broadcast) ---
 static void bumpSeq(){ g_oven.seq++; g_oven.lastUpdateMs = millis(); }
+// Reponse d'une lecture 0x0578 x3 (3 registres, 6 octets). 0xFFFF = invalide : valeur conservee, rien publie.
+// Decodee ici (et non dans ovenApplyReg) pour que l'echo d'une ecriture (Fn 06) ne soit jamais pris pour une relecture.
+static void recipesApply(const uint8_t* d){
+  int32_t* dst[3] = {&g_oven.recipeAirRaw, &g_oven.recipePelletRaw, &g_oven.recipeFlowRaw};
+  bool ok = true;
+  for (int i=0;i<3;i++){
+    uint16_t v = (d[2*i]<<8)|d[2*i+1];
+    if (v == SENTINEL16){ ok = false; continue; }
+    if (*dst[i] != (int32_t)v){ *dst[i] = (int32_t)v; bumpSeq(); }
+  }
+  if (!ok){ Serial.println("!! Recipes: 0xFFFF dans la reponse, valeur ignoree"); return; }
+  g_recipeReadMs = millis(); if (!g_recipeReadMs) g_recipeReadMs = 1;
+  Serial.printf(">> Recipes raw: air=%ld pellet=%ld flow=%ld\n", (long)g_oven.recipeAirRaw, (long)g_oven.recipePelletRaw, (long)g_oven.recipeFlowRaw);
+}
 
 // Garde-fou sur les compteurs monotones (temps de fonctionnement, allumages, temps par
 // puissance). Une trame BLE tronquee ou corrompue produit des valeurs aberrantes qui, une
@@ -317,6 +340,14 @@ void ovenApplyReg(uint16_t reg, uint16_t val){
     case REG_SERVICE_HI: { uint32_t h=((uint32_t)val<<16)|serviceLo;
         if(h<=100000UL && g_oven.serviceH!=(int32_t)h){ g_oven.serviceH=(int32_t)h; bumpSeq(); }   // > 100000 h : trame corrompue, rejete
       } break;
+    case REG_RECIPE_IDX: { int16_t f=val>>8, p=val&0xFF;                // octet haut = flux, bas = pellets ; publies bruts (0xFF compris)
+        if(g_oven.recipeFlowIdx!=f || g_oven.recipePelletIdx!=p)
+          Serial.printf(">> reg 0x0363 (867) = 0x%04X -> index flu=%d pel=%d\n", (unsigned)val, f, p);   // diagnostic : un 0xFFFF = index non gere par ce poele
+        if(g_oven.recipeFlowIdx  !=f){ g_oven.recipeFlowIdx  =f; bumpSeq(); }
+        if(g_oven.recipePelletIdx!=p){ g_oven.recipePelletIdx=p; bumpSeq(); } } break;
+    case REG_MOD_ADA: { int b=val>>8; int8_t v=(b<=1)?(int8_t)b:(int8_t)-1;   // lecture seule ; octet haut 0/1, sinon inconnu
+        if(b>1) Serial.printf("!! mod_ada_on 0x%04X : octet haut %d hors 0..1, ignore\n", (unsigned)val, b);
+        if(g_oven.adaptiveOn!=v){ g_oven.adaptiveOn=v; bumpSeq(); } } break;
     case REG_RESET_CAUSE: if(val!=SENTINEL16 && g_oven.resetCause!=(int32_t)val){ g_oven.resetCause=(int32_t)val; bumpSeq(); } break;
     case REG_FAN_LIVE: if(g_oven.fanLevel!=(int8_t)val){g_oven.fanLevel=(int8_t)val;bumpSeq();} break;
     case REG_FAN2_SET: if(g_oven.fan2Set!=(int8_t)val){g_oven.fan2Set=(int8_t)val;bumpSeq();} break;
@@ -391,6 +422,37 @@ bool ovenSetFanN(int idx, int level){
 bool ovenSetSilent(bool on){
   Serial.printf(">> Silent %s -> reg 0x%04X = %u\n", on?"ON":"OFF", REG_SILENT, on?1:0);
   sendWrite(REG_SILENT, on?1:0); return true;
+}
+// Correction recette (pellets = 1 -> 0x0579, active = 2 -> 0x057A ; air = 0 / 0x0578 : lecture seule, refuse) : -3..+3 -> registre brut = corr + 4 (valide le 21/11, PATCHES §18).
+// Garde-fous : brut lu dans 1..7 et recent, consigne bornee, 1 ecriture / 10 s / registre, RECIPE_WRITE.
+// Apres l'ecriture, relecture de 0x0578 x3 : seule la valeur relue est publiee (jamais la consigne).
+void ovenReadRecipes(){ g_recipeReq = true; g_recipeReqAt = 0; }
+bool ovenSetRecipe(int which, int corr){
+  static uint32_t lastW[3] = {0,0,0};
+  const char* nm = (which==1) ? "pellets" : (which==2) ? "active" : "air";
+#if RECIPE_WRITE
+  if(which<1||which>2){ Serial.println("!! recipe: ecriture possible pour 1=pellets, 2=active seulement (air en lecture seule)"); return false; }
+  if(corr<-3||corr>3){ Serial.printf("!! recipe %s: consigne %d hors -3..+3, rejetee\n", nm, corr); return false; }
+  if(!g_connected || !g_abf1){ Serial.printf("!! recipe %s: BLE non connecte\n", nm); return false; }
+  int32_t raw = (which==1) ? g_oven.recipePelletRaw : g_oven.recipeFlowRaw;
+  uint32_t now = millis();
+  if(raw<1 || raw>7 || !g_recipeReadMs || now-g_recipeReadMs > RECIPE_MAX_AGE_MS){
+    Serial.printf("!! recipe %s: ecriture refusee, brut lu = %ld (attendu 1..7, lecture < %lu s) : codage inconnu ou lecture absente, voir PATCHES §18\n",
+                  nm, (long)raw, (unsigned long)(RECIPE_MAX_AGE_MS/1000));
+    g_recipeReq = true; g_recipeReqAt = 0; return false; }
+  if(lastW[which] && now-lastW[which] < RECIPE_WRITE_GAP_MS){
+    Serial.printf("!! recipe %s: moins de %lu s depuis la derniere ecriture, refusee\n", nm, (unsigned long)(RECIPE_WRITE_GAP_MS/1000)); return false; }
+  uint16_t reg = (which==1) ? REG_RECIPE_PELLET : REG_RECIPE_FLOW;
+  uint16_t v = (uint16_t)(corr + 4);
+  if((int32_t)v == raw){ Serial.printf(">> recipe %s: deja a %+d (brut %u), pas d'ecriture\n", nm, corr, v); g_recipeReq = true; g_recipeReqAt = now + 300; return true; }
+  Serial.printf(">> recipe %s %+d -> reg 0x%04X = %u (brut avant %ld)\n", nm, corr, reg, v, (long)raw);
+  lastW[which] = now; if(!lastW[which]) lastW[which] = 1;
+  sendWrite(reg, v);
+  g_recipeReq = true; g_recipeReqAt = now + 800;   // relecture apres l'echo ; pollTick l'envoie au prochain creneau
+  return true;
+#else
+  (void)corr; Serial.printf("!! recipe %s: ecriture desactivee (RECIPE_WRITE=0)\n", nm); return false;
+#endif
 }
 // Write a °C-scaled setting (hydro hysteresis / pump min temp). Value = celsius*10.
 bool ovenSetTempParam(uint16_t reg, float celsius){
@@ -586,6 +648,7 @@ static void notifyCB(NimBLERemoteCharacteristic*, uint8_t *data, size_t len, boo
       int n=bc/2; for(int i=0;i<n;i++) g_rawDst[i]=(mb[3+2*i]<<8)|mb[3+2*i+1];
       g_rawGot=n;
     }
+    if (g_lastReadBase==REG_RECIPE_AIR && g_lastReadCount==3) recipesApply(mb+3);   // 0x0578 x3 (PATCHES §18)
     if (g_lastReadBase==0x0ADC){                                // serial number (ASCII) + raw diagnostics
       String hexs, asc;
       for(uint8_t i=0;i<bc;i++){ uint8_t b=mb[3+i]; char h[3]; sprintf(h,"%02X",b); hexs+=h;
@@ -646,6 +709,8 @@ static void setupChars() {
   g_caps = OvenCaps{};              // fresh capability scan for this (possibly different) oven
   g_alarmDone=false; g_alarmDirty=true; g_alarmScanning=false; g_alarmIndex=-1; g_alarmLivePrev=-1;
   for(int k=0;k<10;k++) g_oven.alarmHist[k]=-1;
+  g_oven.recipeAirRaw=g_oven.recipePelletRaw=g_oven.recipeFlowRaw=-1;   // nouvelle connexion : on ne se fie pas a l'ancienne lecture
+  g_oven.adaptiveOn=-1; g_adaptReq=false; g_recipeReadMs=0; g_recipeReq=true; g_recipeReqAt=0; g_recipeLastReqMs=millis();
   g_oven.bleOnline = true;
   Serial.println("\n>> Ready. 'help' for commands. Start with 'poll' or 'r 02bc 33'.\n");
 }
@@ -674,11 +739,18 @@ static void handleLine(String line){
   line.trim(); if(!line.length()) return; String low=line; low.toLowerCase();
   if(low=="help"){
     Serial.println("temp <c> | power <1-5> | mode <0-4> | fan|fan2|fan3 <auto|1-5> | silent <on|off> | "
-                   "boots [clear] | on | off | ack | settime | alarms | getchrono | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
+                   "recipes [read] | boots [clear] | on | off | ack | settime | alarms | getchrono | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
   if(low=="poll"){ sendRead(0x02BC,0x33); return; }
   if(low=="status"){ printStatus(); return; }
   if(low=="boots"){ bootHistPrint(); return; }
   if(low=="boots clear"){ bootHistClear(); return; }
+  if(low=="recipes" || low=="recipes read"){          // valeurs brutes 0x0578..0x057A + index 0x0363 (PATCHES §18)
+    Serial.printf(">> Recipes raw: air=%ld pellet=%ld flow(active)=%ld | index flu=%d pel=%d | adaptatif=%d | derniere lecture %s\n",
+      (long)g_oven.recipeAirRaw, (long)g_oven.recipePelletRaw, (long)g_oven.recipeFlowRaw,
+      g_oven.recipeFlowIdx, g_oven.recipePelletIdx, g_oven.adaptiveOn,
+      g_recipeReadMs ? (String((millis()-g_recipeReadMs)/1000)+" s").c_str() : "jamais");
+    if(low=="recipes read"){ ovenReadRecipes(); Serial.println(">> relecture 0x0578 x3 demandee (prochain creneau de poll, <= 2.5 s)"); }
+    return; }
   if(low=="wifi"){                    // diagnostic reseau : etat, MAC, portee
     Serial.printf(">> WiFi status=%d (3=connected)  MAC=%s  IP=%s  RSSI=%d dBm\n",
                   (int)WiFi.status(), WiFi.macAddress().c_str(),
@@ -897,6 +969,10 @@ static void pollTick(){
   uint32_t now=millis();
   if(now-last < POLL_INTERVAL_MS) return;
   last=now;
+  if(now-g_recipeLastReqMs >= RECIPE_POLL_MS){ g_recipeReq=true; g_recipeLastReqMs=now; }
+  if(g_adaptReq){ g_adaptReq=false; sendRead(REG_MOD_ADA, 1); return; }   // mode adaptatif (lecture seule), creneau suivant
+  if(g_recipeReq && (int32_t)(now-g_recipeReqAt) >= 0){   // lecture lente des recettes (PATCHES §18), un creneau a la place d'un bloc
+    g_recipeReq=false; g_adaptReq=true; sendRead(REG_RECIPE_AIR, 3); return; }
   // Always poll status blocks; while the serial number is missing, also read 0x0ADC
   // as the 4th step (does NOT block the status blocks -> no starvation if an oven
   // provides no ASCII serial there).

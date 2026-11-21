@@ -479,6 +479,49 @@ pics de 300 à 400 mA) dès le démarrage, ce qu'une alimentation faible ne tien
 **Limites** : si la liaison devient instable à 8,5 dBm, remonter `WIFI_TX_POWER`. Test : alimenter
 par l'autre ESP, vérifier l'association et la valeur de `boot_reason` (`brownout` confirmerait l'hypothèse).
 
+## 18. Recettes « débit de pellets » et « air » (lecture, capteurs bruts, écriture gardée)
+
+**Objet** : exposer les réglages -3..+3 du menu admin de l'appli MCZ. Table M2, groupe `recipes` :
+`pos_ric_asp` 0x0578 (1400, air / tirage), `pos_ric_pel` 0x0579 (1401, pellets), `pos_ric_flu` 0x057A
+(1402, flux, **lecture seule**) ; registre d'état 867 (0x0363) : `index_ric_flu` (octet **haut**, sub_byte 0)
+et `index_ric_pel` (octet **bas**), déjà couvert par le bloc 0x0320 ×77 donc décodé sans nouvelle lecture.
+Les 7 positions de chaque recette (1403..1413) ne sont pas lues.
+
+**Codage VALIDE sur le matériel le 21/11** (firmware OTA, build 08:25 UTC) : registre brut = valeur de l'appli + 4
+(plage 1..7). Lu au départ : air (0x0578) = 4, pellet (0x0579) = 3, flow (0x057A) = 5 ; l'appli affichait
+« pellet -1 » et « Active +1 », et n'a pas de réglage « air ». Après passage de « Active » à 0 dans l'appli :
+air = 4, pellet = 3, **flow = 4**. Correspondance : « pellet » de l'appli = 0x0579 (`pos_ric_pel`),
+« Active » = 0x057A (`pos_ric_flu`), 0x0578 (`pos_ric_asp`) n'est pas exposé par l'appli : lecture seule ici.
+En conséquence l'entité d'écriture « Correction air » (0x0578) est **remplacée** par « Correction active »
+(0x057A, `recipe_active_corr`, topic `set/recipe_active_corr`) ; sa discovery est retirée (config vide retenue).
+Le texte « HYPOTHESE » ci-dessous date d'avant cette validation. Seule la position brute a été validée :
+l'écriture elle-même n'a pas encore été testée.
+
+**Changements** (`oven.h`, `main.cpp`, `net_mqtt.cpp`, `config_example.h`)
+- Lecture 0x0578 ×3 insérée dans `pollTick` (un créneau de 2,5 s pris à la place d'un bloc, donc cadence des
+  autres blocs inchangée) : après la connexion BLE, puis toutes les 5 min (`RECIPE_POLL_MS`), à la demande
+  (`recipes read`) et ~0,8 s après une écriture. Décodée dans la réponse Fn 03 (`recipesApply`), pas dans
+  `ovenApplyReg` : l'écho d'une écriture (Fn 06) n'est jamais pris pour une relecture. Réponse `0xFFFF` ou
+  lecture en échec : valeur précédente conservée, rien de neuf publié. Valeurs remises à -1 à chaque connexion BLE.
+- Capteurs diagnostic MQTT : `recipe_air_raw`, `recipe_pellet_raw`, `recipe_flow_raw`, `recipe_flow_index`,
+  `recipe_pellet_index` (clés du JSON d'état = object_id).
+- Entités `number` « Correction pellets » (`recipe_pellet_corr`, 0x0579) et « Correction air »
+  (`recipe_air_corr`, 0x0578) : min -3, max 3, pas 1, mode box, `entity_category: config`, commande sur
+  `mcz/<id>/set/<object_id>`. L'état n'est publié que si le brut relu est dans 1..7 (valeur = brut - 4).
+- Écriture (`ovenSetRecipe`, Fn 06 via `sendWrite`, un seul registre) : refusée si brut hors 1..7 ou lecture
+  absente / plus vieille de 10 min (log série explicite) ; consigne hors -3..+3 rejetée ; payload MQTT non
+  entier rejeté (jamais converti en 0) ; 1 écriture / 10 s / registre ; pas d'écriture si la valeur est déjà
+  la bonne. Après écriture : relecture de 0x0578 ×3 et publication de la valeur relue, jamais de la consigne.
+- Interrupteur de compilation `RECIPE_WRITE` (défaut 1, `#ifndef` dans `oven.h`, exemple dans
+  `config_example.h`) : à 0, pas d'entités `number` (discovery retirée), pas d'abonnement, `ovenSetRecipe` refuse ;
+  lecture et capteurs bruts restent.
+- Série : `recipes` (brut, index, âge de la lecture), `recipes read` (relecture à la demande).
+
+**Limites** : les registres 1400..1402 sont aussi dans la table `nvm` : chaque écriture est probablement
+persistante (usure flash du poêle, d'où la limite de cadence). Effet réel sur la combustion non évalué : tester
+de petits écarts, poêle surveillé. Procédure de validation après flash : lancer `recipes`, lire l'appli
+(menu admin), comparer brut / appli pour plusieurs positions, et seulement ensuite écrire une valeur.
+
 ## 19. Historique persistant des raisons de démarrage
 
 **But** : un ESP alimenté par la sortie d'un autre ESP ne rejoint pas le Wi-Fi, et le rebrancher sur le Mac
@@ -497,3 +540,16 @@ efface `esp_reset_reason()`. On veut voir après coup s'il a rebooté en boucle 
 brownout répété l'écriture NVS peut elle-même échouer (message `!! boothist: NVS inaccessible`). Le
 dernier code d'un boot en cours de brownout peut manquer si l'ESP retombe avant `setup()`.
 
+**Suite (21/11)**
+- Entités : `number` « Correction pellets » (0x0579) et « Correction active » (0x057A) ; `recipe_air_corr`
+  retirée ; capteur `recipe_air_raw` renommé « Recette tirage (brut) ».
+- Index du registre 867 publiés vides dans HA : le décodage (octet haut = flux, bas = pellets) écartait la valeur
+  `0xFF` comme « invalide », donc rien n'était publié si le poêle renvoie 0xFFFF (cause probable, non confirmée
+  faute de lecture du registre). Les octets sont maintenant publiés tels quels (0xFF = 255) et un log
+  `>> reg 0x0363 (867) = 0x.... -> index flu=.. pel=..` apparaît à chaque changement, ainsi que dans `recipes`.
+  Si l'index reste vide, 0x0363 n'est jamais reçu : lancer `r 0363 1`.
+- Mode adaptatif : registre 1527 (0x05F7) `mod_ada_on`, type 11 (octet de drapeau, comme `set_orodatario` écrit
+  en octet haut), octet haut = `mod_ada_on` (octet bas = `tipo_pul_pot5`). Lecture seule ×1 dans le créneau
+  de poll qui suit la lecture des recettes (un créneau de 2,5 s toutes les 5 min en plus) ; `binary_sensor`
+  diagnostic « Mode adaptatif » (`adaptive_mode`, ON/OFF ; octet haut hors 0..1 = inconnu, non publié).
+  Aucune écriture. Valeur attendue : OFF (affiché « off » dans l'appli).

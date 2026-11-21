@@ -84,6 +84,20 @@ static const uint16_t REG_ABI_VEN12   = 0x06F4;  // abi_ven1/2_tlc_app (1780): f
 static const uint16_t REG_ABI_VEN34   = 0x06F5;  // abi_ven3/4_tlc_app (1781)
 static const uint16_t REG_CLIMA       = 0x0372;  // 882: HIGH byte = tipo_allarme_clima, LOW byte = stato_clima (0 = absent)
 static const uint16_t REG_BANCADATI   = 0x07C6;  // rev_banca_dati (1990) + banca_dati name (1991..1998)
+// Recettes (menu admin de l'appli, echelle -3..+3) : PATCHES §18. Codage brut = HYPOTHESE (1..7, 4 = 0 ?).
+static const uint16_t REG_RECIPE_AIR    = 0x0578; // 1400 pos_ric_asp : position recette air / tirage (uint16)
+static const uint16_t REG_RECIPE_PELLET = 0x0579; // 1401 pos_ric_pel : position recette pellets
+static const uint16_t REG_RECIPE_FLOW   = 0x057A; // 1402 pos_ric_flu : position recette flux = « Active » de l'appli (validee 21/11)
+static const uint16_t REG_MOD_ADA       = 0x05F7; // 1527 mod_ada_on : mode adaptatif, type 11 (octet), octet HAUT (sub_byte 0) ; octet bas = tipo_pul_pot5
+static const uint16_t REG_RECIPE_IDX    = 0x0363; // 867 : octet HAUT = index_ric_flu, octet BAS = index_ric_pel (status, bloc 0x0320)
+#if defined(__has_include)
+#  if __has_include("config.h")
+#    include "config.h"     // RECIPE_WRITE doit etre connu avant le defaut ci-dessous (main.cpp inclut oven.h avant config.h)
+#  endif
+#endif
+#ifndef RECIPE_WRITE
+#define RECIPE_WRITE 1   // 0 = aucune ecriture des recettes (entites number absentes, ovenSetRecipe refuse)
+#endif
 static const uint16_t SENTINEL16      = 0xFFFF;
 
 // Detected stove capabilities. Filled once after connect (see capScan in main.cpp);
@@ -144,6 +158,12 @@ struct OvenState {
   int32_t  fumesFanReal = -1;  // Flue gas fan actual speed (0x02D2 vel_real_ventola_fumi)
   int8_t   powerNow   = -1;    // potenza_att (0x0323 high byte): puissance en cours 0..5
   int32_t  serviceH   = -1;    // ore_service (0x034E-F): heures avant entretien
+  int32_t  recipeAirRaw    = -1;  // pos_ric_asp (0x0578) brut, -1 = pas encore lu / lecture invalide
+  int32_t  recipePelletRaw = -1;  // pos_ric_pel (0x0579) brut
+  int32_t  recipeFlowRaw   = -1;  // pos_ric_flu (0x057A) brut
+  int16_t  recipeFlowIdx   = -1;  // index_ric_flu (0x0363 octet haut), brut 0..255 (255 = 0xFF tel que lu), -1 = jamais recu
+  int16_t  recipePelletIdx = -1;  // index_ric_pel (0x0363 octet bas), idem
+  int8_t   adaptiveOn      = -1;  // mod_ada_on (0x05F7 octet haut) : 0/1, -1 = inconnu / valeur hors 0..1
   int32_t  resetCause = -1;    // dia_res_cau (0x0351): cause de reset
   int8_t   fanLevel   = -1;    // Live control fan level (0x0324), 1..5
   int8_t   fan2Set    = -1;    // set_vent_v2 (0x03FB): 1..5, 6 = Auto
@@ -202,5 +222,7 @@ bool ovenSetFan(int level);      // 0 = Auto (writes 6), 1..5 = fixed level -> R
 bool ovenSetFanN(int idx, int level);  // idx 2|3 -> REG_FAN2_SET / REG_FAN3_SET, same encoding
 bool ovenSetSilent(bool on);     // Silent mode on/off -> REG_SILENT
 bool ovenSetTempParam(uint16_t reg, float celsius);  // write a °C-scaled setting (value = C*10)
+bool ovenSetRecipe(int which, int corr);  // which 1 = pellets (0x0579), 2 = active (0x057A) ; 0 (air) refuse, lecture seule ; corr -3..+3 (brut = corr+4, a valider) ; PATCHES §18
+void ovenReadRecipes();          // demande une relecture de 0x0578 x3 (prise en charge par pollTick)
 bool ovenSetClock();             // set the oven RTC from NTP (writes 900-903 + trigger 904)
 bool ovenResetAlarm();           // acknowledge the active alarm -> REG_ALARM_RESET=1 (only if one is active)
