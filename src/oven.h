@@ -10,6 +10,8 @@ static const uint16_t REG_MODE     = 0x03E9;  // Operating mode, enum 0x03E9:
                                               // 0=Manual,1=Auto,2=Overnight (verified),
                                               // 3=Comfort,4=Turbo (ASSUMED, verify via read test)
 static const uint16_t REG_ONOFF    = 0x038A;  // Power TOGGLE: write 1 = toggle on/off
+static const uint16_t REG_ALARM_RESET = 0x038B; // com_reset_allarm (907): write 1 = acknowledge alarm
+                                              // (same command type 13 as com_on_off; from register DB)
 // Date/time block (status_exchange). Byte layout VERIFIED by read-back on the device
 // (binary, not BCD; full year; weekday 0=Monday..6=Sunday). Note: hi/lo is the reverse
 // of the informal spec -> use exactly this mapping.
@@ -111,6 +113,7 @@ struct OvenState {
   int8_t   fanLevel   = -1;    // Live control fan level (0x0324), 1..5
   int8_t   fan2Set    = -1;    // set_vent_v2 (0x03FB): 1..5, 6 = Auto
   int8_t   fan3Set    = -1;    // set_vent_v3 (0x03FC): 1..5, 6 = Auto
+  int16_t  alarm      = -1;    // Live alarm code (0x0323 low byte): 0 = no alarm, >0 = active "Axx"
   int16_t  alarmHist[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};  // last 10 alarm codes, newest first (-1=empty, 0=none)
   bool     bleOnline  = false; // BLE link to oven active
   uint32_t lastUpdateMs = 0;   // millis() of the last value update
@@ -163,3 +166,4 @@ bool ovenSetFanN(int idx, int level);  // idx 2|3 -> REG_FAN2_SET / REG_FAN3_SET
 bool ovenSetSilent(bool on);     // Silent mode on/off -> REG_SILENT
 bool ovenSetTempParam(uint16_t reg, float celsius);  // write a °C-scaled setting (value = C*10)
 bool ovenSetClock();             // set the oven RTC from NTP (writes 900-903 + trigger 904)
+bool ovenResetAlarm();           // acknowledge the active alarm -> REG_ALARM_RESET=1 (only if one is active)
