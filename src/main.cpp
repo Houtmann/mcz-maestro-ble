@@ -32,6 +32,7 @@
 #include "diag.h"        // build diagnostic (MCZ_DIAG) : macros vides sinon
 #include "ble_api.h"
 #include "chrono.h"
+#include "boothist.h"
 #if defined(__has_include)
 #  if __has_include("config.h")
 #    include "config.h"
@@ -673,9 +674,11 @@ static void handleLine(String line){
   line.trim(); if(!line.length()) return; String low=line; low.toLowerCase();
   if(low=="help"){
     Serial.println("temp <c> | power <1-5> | mode <0-4> | fan|fan2|fan3 <auto|1-5> | silent <on|off> | "
-                   "on | off | ack | settime | alarms | getchrono | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
+                   "boots [clear] | on | off | ack | settime | alarms | getchrono | status | poll | scan | target <mac|none> | log <on|off> | r <regHex> <count> | w <regHex> <valHex> | wm <regHex> <v..> | ctr <hex> | help"); return; }
   if(low=="poll"){ sendRead(0x02BC,0x33); return; }
   if(low=="status"){ printStatus(); return; }
+  if(low=="boots"){ bootHistPrint(); return; }
+  if(low=="boots clear"){ bootHistClear(); return; }
   if(low=="wifi"){                    // diagnostic reseau : etat, MAC, portee
     Serial.printf(">> WiFi status=%d (3=connected)  MAC=%s  IP=%s  RSSI=%d dBm\n",
                   (int)WiFi.status(), WiFi.macAddress().c_str(),
@@ -802,8 +805,10 @@ bool bleScanListGet(int i, String& mac, String& name){
   mac=g_scanItems[i].mac; name=g_scanItems[i].name; return true;
 }
 void setup(){
+  bootHistRecord();           // le plus tot possible : raison de ce boot -> NVS (PATCHES §19)
   Serial.begin(115200); delay(300);
   Serial.println("\n=== MCZ BLE-Modbus-Controller ===");
+  bootHistPrint();
   configLoad();               // runtime config from NVS (defaults from config.h)
   displayInstance().begin();  // display FIRST -> UI visible immediately (instead of ~8s white)
   NimBLEDevice::init(""); NimBLEDevice::setMTU(517); setupSecurity();

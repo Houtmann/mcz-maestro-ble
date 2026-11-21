@@ -7,12 +7,14 @@
 #if USE_MQTT
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_system.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include "config.h"
 #include "appconfig.h"
 #include "oven.h"
 #include "diag.h"
+#include "boothist.h"
 // OTA HTTP (PATCHES §14) : compilee si OTA_PASSWORD est defini dans config.h, active si non vide.
 // Le serveur web est le meme que celui du point d'acces de secours (un seul WebServer, port 80).
 #if defined(OTA_PASSWORD)
@@ -38,6 +40,15 @@ static bool       g_wifiWasUp = false, g_wifiEverUp = false;
 static const uint32_t WIFI_BLE_HOLD_MS = 30000;    // BLE muet pendant les 30 premieres s d'une association
 static const uint32_t WIFI_FULL_RESTART_MS = 60000;   // sans connexion : disconnect(true)+begin complet
 static const uint32_t WIFI_REBOOT_MS = 600000;        // sans connexion depuis 10 min : ESP.restart()
+// Puissance d'emission WiFi (PATCHES §17) : reglable dans config.h, 8.5 dBm par defaut
+// (pics de courant plus faibles que les ~20 dBm par defaut ; AP a moins de 1 m).
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER WIFI_POWER_8_5dBm
+#endif
+static void wifiTxPower(){ WiFi.setTxPower(WIFI_TX_POWER); }
+// Raison du dernier redemarrage de l'ESP (PATCHES §17), lue une fois au boot.
+static const char* bootReasonStr(){ return bootReasonName((int)esp_reset_reason()); }
+static const char* g_bootReason = bootReasonStr();
 #if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
 static bool       g_apUp = false;
 static String     g_scanCache;
@@ -336,6 +347,9 @@ static void publishDiscovery(){
   addSensor("bridge_ip", "Bridge IP", optTpl("ip").c_str(), "", "", "", "diagnostic");
   addSensor("ota_state", "OTA", optTpl("ota").c_str(), "", "", "", "diagnostic");
   addSensor("bridge_uptime", "Bridge uptime", optTpl("uptime_s").c_str(), "s", "duration", "measurement", "diagnostic");
+  addSensor("boot_reason", "Boot reason", optTpl("boot_reason").c_str(), "", "", "", "diagnostic");
+  addSensor("boot_history", "Boot history", optTpl("boot_history").c_str(), "", "", "", "diagnostic");   // PATCHES §19
+  addSensor("boot_count", "Boot count", optTpl("boot_count").c_str(), "", "", "total_increasing", "diagnostic");
   addSensor("wifi_reconnects", "WiFi reconnections", optTpl("wifi_reconnects").c_str(), "", "", "total_increasing", "diagnostic");
   // Capteurs ajoutes d'apres la table M2 (PATCHES §15). Valeurs hors plage / sentinelles non publiees.
   addSensor("outdoor_temp", "Outdoor temperature", optTpl("outdoor_temp").c_str(), "°C", "temperature", "measurement");
@@ -382,7 +396,7 @@ static void publishDiscovery(){
     addDevice(d.as<JsonObject>()); publishJson(discoTopic("sensor","service_h"), d, true);
   }
   { JsonDocument d;                              // dia_res_cau (849) : cause de reset
-    d["name"]="Reset cause"; d["unique_id"]=g_id+"_reset_cause";
+    d["name"]="Poêle : cause de reset"; d["unique_id"]=g_id+"_reset_cause";
     d["availability_topic"]=T_AVAIL; d["state_topic"]=T_STATE;
     d["value_template"]="{{ value_json.reset_cause }}";
     d["entity_category"]="diagnostic"; d["icon"]="mdi:restart-alert";
@@ -465,7 +479,7 @@ static void publishState(){
     char k[8]; snprintf(k,sizeof(k),"pt%d_h",i+1); d[k] = serialized(String(g_oven.powerTimeMin[i]/60.0, 2));
   }
   d["ble"] = g_oven.bleOnline;
-  d["uptime_s"] = (uint32_t)(millis()/1000); d["ota"] = otaState(); d["wifi_reconnects"] = g_wifiReconnects;
+  d["uptime_s"] = (uint32_t)(millis()/1000); d["ota"] = otaState(); d["boot_reason"] = g_bootReason; d["boot_history"] = bootHistString(); d["boot_count"] = bootHistCount(); d["wifi_reconnects"] = g_wifiReconnects;
   if (WiFi.status() == WL_CONNECTED){ d["ip"] = WiFi.localIP().toString(); }
   if (WiFi.status() == WL_CONNECTED) d["rssi"] = WiFi.RSSI();   // rafraichi par le heartbeat (HEARTBEAT_MS)
   d["seq"] = g_oven.seq;
@@ -668,6 +682,7 @@ static void wifiBegin(){
   }
 #endif
   WiFi.begin(g_cfg.wifiSsid.c_str(), g_cfg.wifiPass.c_str());
+  wifiTxPower();
   WiFi.setSleep(true);                // VERIFIE : setSleep(false) fait paniquer la puce (reboot en boucle)
   g_wifiAttemptMs = millis();
 }
@@ -683,7 +698,9 @@ void netBegin(){
 #else
   Serial.println(">> OTA desactivee (OTA_PASSWORD absent de config.h)");
 #endif
+  Serial.printf(">> Boot reason: %s\n", g_bootReason);
   WiFi.mode(WIFI_STA);
+  wifiTxPower();
   WiFi.setSleep(true);                // BLE+WiFi coexistence: modem sleep MUST be on
                                       // VERIFIE : setSleep(false) fait paniquer la puce (reboot en boucle)
   wifiBegin();
@@ -722,7 +739,7 @@ void netTick(){
       }
       if (n == 0) g_scanCache = "(aucun reseau visible)\n";
       WiFi.scanDelete();
-      WiFi.mode(WIFI_AP_STA);
+      WiFi.mode(WIFI_AP_STA); wifiTxPower();
       WiFi.softAP(FALLBACK_AP_SSID, FALLBACK_AP_PASS);
       g_diagSrv.onNotFound([](){ g_diagSrv.send(200, "text/plain; charset=utf-8", diagPage()); });
       g_diagSrv.begin();
@@ -743,7 +760,7 @@ void netTick(){
   }
 #if defined(FALLBACK_AP) && (FALLBACK_AP == 1)
   if (g_apUp){                       // WiFi revenu : refermer l'AP de secours
-    g_diagSrv.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA);
+    g_diagSrv.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); wifiTxPower();
     g_apUp = false; Serial.println(">> WiFi retabli : point d'acces de secours ferme");
 #ifdef OTA_COMPILED
     g_otaUp = false;                 // stop() a ferme le serveur : OTA redemarree ci-dessous

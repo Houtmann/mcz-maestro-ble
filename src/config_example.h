@@ -61,6 +61,10 @@
 #define FALLBACK_AP_PASS      "mczbridge"      // 8 caracteres minimum (WPA2)
 #define FALLBACK_AP_DELAY_S   60
 
+// Puissance d'emission WiFi (PATCHES.md §17). Optionnel ; defaut WIFI_POWER_8_5dBm.
+// Alimentation faible (sortie d'un autre ESP) : baisser si brownout ; remonter si la liaison est mauvaise.
+// #define WIFI_TX_POWER  WIFI_POWER_8_5dBm
+
 // ---- Mise a jour OTA par HTTP (PATCHES.md §14) ------------------------------
 // POST http://<ip>/update (multipart, champ `firmware`), Basic Auth, utilisateur `admin`.
 // Mot de passe ci-dessous ; absent ou "" = OTA desactivee. Valeur bidon : a changer.

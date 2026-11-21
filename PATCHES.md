@@ -455,3 +455,45 @@ détection du poêle de quelques secondes ; un Wi-Fi qui ne revient jamais décl
 toutes les 10 min ; l'AP de secours (§7) reste ouvert à 60 s sans Wi-Fi, avec la même
 coexistence radio qu'avant. Cause non prouvée sur le matériel (hypothèse étayée par le code).
 Test : `wifi` en série (doit lister les réseaux), `curl http://<ip>/`.
+
+## 17. Puissance d'émission Wi-Fi réduite et raison du dernier redémarrage
+
+**Symptôme** : alimenté par la sortie d'un autre ESP (et non par l'USB du Mac), le firmware du §16
+ne rejoint plus le point d'accès (aucune tentative visible côté hostapd) ; l'ancien firmware, où le
+BLE affamait le Wi-Fi, fonctionnait.
+
+**Hypothèse (non prouvée)** : brownout. Depuis le §16 le Wi-Fi émet à pleine puissance (~20 dBm,
+pics de 300 à 400 mA) dès le démarrage, ce qu'une alimentation faible ne tient pas.
+
+**Correctifs** (`net_mqtt.cpp`)
+- `WiFi.setTxPower(WIFI_TX_POWER)` après chaque `WiFi.mode()` / `WiFi.begin()` (`netBegin()`,
+  `wifiBegin()` donc aussi l'association complète du watchdog, passages `WIFI_AP_STA` / `WIFI_STA`
+  de l'AP de secours). `WIFI_TX_POWER` : défaut `WIFI_POWER_8_5dBm`, surchargeable dans `config.h`
+  (exemple dans `config_example.h`). `setSleep(true)` inchangé ; détecteur de brownout laissé actif.
+- Nouveau capteur diagnostic `boot_reason` (`esp_reset_reason()` lu une fois au boot : `poweron`,
+  `brownout`, `panic`, `task_wdt`, `int_wdt`, `sw`, `deepsleep`, `ext`, `sdio`, `unknown`), dans le
+  payload d'état et la discovery, affiché aussi en série (`>> Boot reason: ...`).
+- Le capteur `reset_cause` (registre 0x0351 du POÊLE) est renommé « Poêle : cause de reset »
+  (`unique_id` inchangé).
+
+**Limites** : si la liaison devient instable à 8,5 dBm, remonter `WIFI_TX_POWER`. Test : alimenter
+par l'autre ESP, vérifier l'association et la valeur de `boot_reason` (`brownout` confirmerait l'hypothèse).
+
+## 19. Historique persistant des raisons de démarrage
+
+**But** : un ESP alimenté par la sortie d'un autre ESP ne rejoint pas le Wi-Fi, et le rebrancher sur le Mac
+efface `esp_reset_reason()`. On veut voir après coup s'il a rebooté en boucle (brownout, panic).
+
+**Changements** (`boothist.cpp/.h`, `main.cpp`, `net_mqtt.cpp`)
+- `bootHistRecord()` en tête de `setup()` (avant même `Serial.begin`) : ajoute le code numérique de
+  `esp_reset_reason()` à un tampon circulaire de 10 entrées (plus récent d'abord) et incrémente un compteur de
+  boots qui ne fait qu'augmenter. NVS, namespace `boothist`, clé `h` : une seule structure de 14 octets, donc
+  **une seule écriture NVS par boot**.
+- Série : l'historique est affiché au boot ; `boots` l'affiche, `boots clear` le vide (compteur remis à 0).
+- MQTT : capteurs diagnostic `boot_history` (chaîne compacte, ex. `sw,brownout,brownout,poweron`) et `boot_count`
+  (clés du JSON d'état du même nom). Le capteur `boot_reason` (§17) réutilise `bootReasonName()`.
+
+**Limites** : un boot sans Wi-Fi n'est visible qu'au prochain boot qui rejoint MQTT (ou en série) ; après un
+brownout répété l'écriture NVS peut elle-même échouer (message `!! boothist: NVS inaccessible`). Le
+dernier code d'un boot en cours de brownout peut manquer si l'ESP retombe avant `setup()`.
+
